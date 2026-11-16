@@ -58,8 +58,8 @@ redirect_urls = [ "https://test.protocoltherapeutics.com/auth/callback", "https:
 # redirect_urls = [ "https://api.protocoltherapeutics.com/auth/callback", "https://api.protocoltherapeutics.com/api/auth" ]
 
 [build]
-automatically_update_urls_on_dev = true
-# automatically_update_urls_on_dev = false
+# automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false
 
 
 # Storefront API: https://<store>/apps/rx/...  ->  <app>/proxy/...
