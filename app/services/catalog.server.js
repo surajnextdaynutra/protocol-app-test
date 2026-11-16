@@ -69,6 +69,8 @@ export const METAFIELD_COLUMNS = [
   { column: "Product Short Headline", key: "product_short_headline", type: "single_line_text_field" },
   { column: "Servings Per Container", key: "servings_per_container", type: "single_line_text_field" },
   { column: "Wholsale Price", key: "wholsale_price", type: "money" },
+  // PT Profit reporting only (wholesale - MFG COGS - commission) - never a price
+  { column: "MFG COGS", key: "mfg_cogs", type: "money" },
   { column: "MSRP High", key: "msrp_high", type: "money" },
   { column: "MSRP Low", key: "msrp_low", type: "money" },
   { column: "Peptides Support + Keywords", key: "peptides_support_keywords", type: "rich_text_field" },
@@ -645,37 +647,163 @@ async function writeMetafields(productId, row) {
   return ok;
 }
 
-/** Replaces the product's images with the comma-separated URL list. */
+/* ------------------------------- images ---------------------------------
+   Product images are SHARED Shopify files. Each image URL in the master's
+   Images column must be a file that is already in Content > Files; the base
+   product and every practice copy point at that same file (fileUpdate
+   referencesToAdd). The sync never uploads an image (no fileCreate) - so
+   Files never fills with duplicates or FAILED uploads.
+
+   Registry (kv): imgfile:<url without ?query> -> file id, and
+   imgshared:<file id> -> 1 for every file used this way. A shared file is only
+   ever DETACHED from a product (referencesToRemove) - deleting it would take
+   it off the master and every other copy too. Media that is not a shared file
+   (the per-copy duplicates the old upload-per-product sync left behind) is
+   deleted outright, as before. */
+
+const imgKey = (u) => String(u || "").trim().split(/[?#]/)[0].replace(/^http:\/\//i, "https://");
+const IMG_FILE = (key) => `imgfile:${key}`;
+const IMG_SHARED = (id) => `imgshared:${id}`;
+
+async function rememberSharedImage(key, id) {
+  await kvSet(IMG_FILE(key), id);
+  await kvSet(IMG_SHARED(id), 1);
+}
+
+/** An image already in Content > Files with this exact URL (same path). */
+async function findImageFile(url) {
+  const key = imgKey(url);
+  const name = decodeURIComponent(key.split("/").pop() || "");
+  if (!name || !/cdn\.shopify\.com|\/cdn\/shop\//i.test(key)) return "";
+  const d = await gql(
+    `#graphql
+    query RxFindImage($q: String!) {
+      files(first: 25, query: $q) { nodes { id fileStatus ... on MediaImage { image { url } } } }
+    }`,
+    { q: `filename:${JSON.stringify(name)}` },
+  );
+  const hit = (d.files?.nodes || []).find((n) => n.fileStatus === "READY" && imgKey(n.image?.url) === key);
+  return hit?.id || "";
+}
+
+/** URL list -> shared file ids, in order. The sync NEVER uploads an image:
+ *  each URL must be a file that already exists in Content > Files (or the
+ *  product's own current image), and that same file is attached to every
+ *  copy. A URL with no such file is reported in `missing` and left alone. */
+async function sharedImageIds(urls, current) {
+  const ids = [];
+  const missing = [];
+  for (const u of urls) {
+    const key = imgKey(u);
+    let id = await kvGet(IMG_FILE(key));
+    if (!id) {
+      id = current.find((m) => m.key === key)?.id || (await findImageFile(u));
+      if (id) await rememberSharedImage(key, id);
+    }
+    if (!id) missing.push(key);
+    else if (!ids.includes(id)) ids.push(id);
+  }
+  return { ids, missing };
+}
+
+/** Points the product at the shared image files for the comma-separated URL
+ *  list (same order). Returns false when something failed, so the product is
+ *  retried on the next sync. A blank Images column leaves the product's
+ *  images alone. */
 async function writeImages(productId, raw) {
   const urls = String(raw || "").split(",").map((u) => u.trim()).filter(Boolean);
-  if (!urls.length) return;
-  const cur = await gql(
-    `#graphql
-    query RxProductMedia($id: ID!) { product(id: $id) { media(first: 50) { nodes { id } } } }`,
-    { id: productId },
-  );
-  const existing = cur.product?.media?.nodes || [];
-  if (existing.length) {
-    await gql(
+  if (!urls.length) return true;
+  const fail = (msg) => {
+    logEvent("sync", "product-sync", `images for ${productId}: ${String(msg).slice(0, 300)}`, null, false);
+    return false;
+  };
+
+  const readMedia = async () => {
+    const d = await gql(
       `#graphql
-      mutation RxDeleteMedia($pid: ID!, $ids: [ID!]!) {
-        productDeleteMedia(productId: $pid, mediaIds: $ids) { userErrors { message } }
+      query RxProductMedia($id: ID!) {
+        product(id: $id) { media(first: 50) { nodes { id ... on MediaImage { image { url } } } } }
       }`,
-      { pid: productId, ids: existing.map((m) => m.id) },
+      { id: productId },
     );
+    return (d.product?.media?.nodes || []).map((n) => ({ id: n.id, key: imgKey(n.image?.url) }));
+  };
+
+  const current = await readMedia();
+  const { ids: want, missing } = await sharedImageIds(urls, current);
+  if (missing.length) {
+    return fail(`not in Content > Files (nothing uploaded - images left as they were): ${missing.join(", ")}`);
   }
-  const res = await gql(
-    `#graphql
-    mutation RxCreateMedia($pid: ID!, $m: [CreateMediaInput!]!) {
-      productCreateMedia(productId: $pid, media: $m) { mediaUserErrors { message } }
-    }`,
-    { pid: productId, m: urls.map((u) => ({ originalSource: u, mediaContentType: "IMAGE" })) },
-  );
-  // was silently ignored - a failed image now shows up in Sync & logs
-  const errs = res.productCreateMedia?.mediaUserErrors || [];
-  if (errs.length) {
-    logEvent("sync", "product-sync", `images for ${productId}: ${errs.map((e) => e.message).join("; ").slice(0, 300)}`, null, false);
+
+  const curIds = current.map((m) => m.id);
+  const toAdd = want.filter((id) => !curIds.includes(id));
+  const toRemove = curIds.filter((id) => !want.includes(id));
+
+  if (toAdd.length) {
+    const res = await gql(
+      `#graphql
+      mutation RxAttachImages($files: [FileUpdateInput!]!) {
+        fileUpdate(files: $files) { files { id } userErrors { field message code } }
+      }`,
+      { files: toAdd.map((id) => ({ id, referencesToAdd: [productId] })) },
+    );
+    const errs = res.fileUpdate?.userErrors || [];
+    if (errs.length) {
+      // a registered file that was deleted in Shopify: forget it - the next
+      // sync uploads that image once more and shares the new file
+      for (const id of toAdd) {
+        if (!(await gql(`#graphql
+          query RxFileExists($id: ID!) { node(id: $id) { id } }`, { id })).node) {
+          for (const u of urls) if ((await kvGet(IMG_FILE(imgKey(u)))) === id) await kvSet(IMG_FILE(imgKey(u)), null, 1);
+        }
+      }
+      return fail(`attach: ${errs.map((e) => e.message).join("; ")}`);
+    }
   }
+
+  if (toRemove.length) {
+    const shared = [], own = [];
+    for (const id of toRemove) ((await kvGet(IMG_SHARED(id))) ? shared : own).push(id);
+    if (shared.length) {
+      // detach only - the file stays for the master and the other copies
+      const res = await gql(
+        `#graphql
+        mutation RxDetachImages($files: [FileUpdateInput!]!) {
+          fileUpdate(files: $files) { files { id } userErrors { field message } }
+        }`,
+        { files: shared.map((id) => ({ id, referencesToRemove: [productId] })) },
+      );
+      const errs = res.fileUpdate?.userErrors || [];
+      if (errs.length) return fail(`detach: ${errs.map((e) => e.message).join("; ")}`);
+    }
+    if (own.length) {
+      // this product's private duplicates from the old per-copy uploads
+      const res = await gql(
+        `#graphql
+        mutation RxDeleteMedia($pid: ID!, $ids: [ID!]!) {
+          productDeleteMedia(productId: $pid, mediaIds: $ids) { mediaUserErrors { message } }
+        }`,
+        { pid: productId, ids: own },
+      );
+      const errs = res.productDeleteMedia?.mediaUserErrors || [];
+      if (errs.length) return fail(`remove old copies: ${errs.map((e) => e.message).join("; ")}`);
+    }
+  }
+
+  // same order as the Images column (the first one is the featured image)
+  const after = (await readMedia()).map((m) => m.id).filter((id) => want.includes(id));
+  if (after.join() !== want.join()) {
+    const res = await gql(
+      `#graphql
+      mutation RxReorderImages($id: ID!, $moves: [MoveInput!]!) {
+        productReorderMedia(id: $id, moves: $moves) { mediaUserErrors { message } }
+      }`,
+      { id: productId, moves: want.map((id, i) => ({ id, newPosition: String(i) })) },
+    );
+    const errs = res.productReorderMedia?.mediaUserErrors || [];
+    if (errs.length) return fail(`order: ${errs.map((e) => e.message).join("; ")}`);
+  }
+  return true;
 }
 
 /** Purchase Options = a selling plan group gid -> subscription ON for this
@@ -831,6 +959,9 @@ function signature(m, tags, vendor = "") {
     sku: m[P.SKU], sp: m[P.PURCHASE_OPTIONS], pub: m[P.PUBLISHED], images: m[P.IMAGES],
     mfJson: m[P.METAFIELDS],
     mf: [...METAFIELD_COLUMNS, ...METAFIELD_REF_COLUMNS].map((d) => m[d.column]),
+    // images as shared files (2026-11-13): every product syncs once more so
+    // the old per-copy duplicate images are swapped for the one shared file
+    imgMode: "shared-files-1",
   };
   return crypto.createHash("md5").update(JSON.stringify(payload)).digest("base64");
 }
@@ -913,10 +1044,10 @@ async function upsertFromMaster(master, target) {
     if (target.withPatientPrice && target.launchPrice != null) await setPatientPrice(product.id, target.launchPrice);
     await setInventoryFromMaster(variant.inventoryItem.id, m, master, target);
     const mfOk = await writeMetafields(product.id, m);
-    await writeImages(product.id, m[P.IMAGES]);
+    const imgOk = await writeImages(product.id, m[P.IMAGES]);
     await syncSubscription(product.id, m[P.PURCHASE_OPTIONS]);
     await setPublished(product.id, isPublished(m));
-    await markSynced(mfOk);
+    await markSynced(mfOk && imgOk);
     syncProductLater(product.id);
     return "created";
   }
@@ -946,10 +1077,10 @@ async function upsertFromMaster(master, target) {
   );
   await setVariant(existing.productId, existing.variantId, { sku: String(m[P.SKU] || "") });
   const mfOk = await writeMetafields(existing.productId, m);
-  await writeImages(existing.productId, m[P.IMAGES]);
+  const imgOk = await writeImages(existing.productId, m[P.IMAGES]);
   await syncSubscription(existing.productId, m[P.PURCHASE_OPTIONS]);
   await setPublished(existing.productId, isPublished(m));
-  await markSynced(mfOk);
+  await markSynced(mfOk && imgOk);
   syncProductLater(existing.productId);
   return "updated";
 }

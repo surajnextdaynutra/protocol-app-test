@@ -114,6 +114,7 @@ const lineItemSchema = new Schema(
     physicianRate: { type: Number, default: 0 },
     clinicRate: { type: Number, default: 0 },
     wholesale: { type: Number, default: 0 },
+    cogs: { type: Number, default: null }, // MFG COGS per unit at payment time (null = not set on the product)
   },
   { _id: false },
 );
@@ -186,6 +187,16 @@ const orderSchema = new Schema(
       practiceAmt: { type: Number, default: 0 },
       repId: { type: String, default: "", index: true },
       repAmt: { type: Number, default: 0 },
+      repRate: { type: Number, default: null }, // $ per unit the rep was paid at
+      // the rep who referred `repId`: earns refRate per unit of this order
+      refRepId: { type: String, default: "", index: true },
+      refRate: { type: Number, default: 0 },
+      refAmt: { type: Number, default: 0 },
+      // PT Profit = wholesale - MFG COGS - rep + referral commission
+      ptRevenue: { type: Number, default: null },
+      cogs: { type: Number, default: null },
+      cogsMissing: { type: Boolean, default: false }, // a line's product has no MFG COGS
+      ptProfit: { type: Number, default: null },
       solo: { type: Boolean, default: false },
       counted: { type: String, default: "No" }, // Yes / No / Reversed
       month: { type: String, default: "" }, // yyyy-MM the split was counted into
@@ -214,6 +225,7 @@ orderSchema.index({ doctorId: 1, orderCreatedAt: -1 });
 orderSchema.index({ clinicId: 1, orderCreatedAt: -1 });
 orderSchema.index({ practiceId: 1, orderCreatedAt: -1 });
 orderSchema.index({ "commission.repId": 1, orderCreatedAt: -1 });
+orderSchema.index({ "commission.refRepId": 1, orderCreatedAt: -1 });
 orderSchema.index({ "customer.id": 1, orderCreatedAt: -1 });
 // every dashboard / home-page / Orders-page query filters on the `rx` tag;
 // without it the Orders ledger's $or ({commission.logged} OR {tags}) is a full scan
@@ -289,10 +301,106 @@ const salesRepSchema = new Schema(
     commissionPercent: { type: Number, default: null },
     notes: { type: String, default: "" },
     active: { type: Boolean, default: true },
+    // the rep who referred this one: earns the referral rate on every unit
+    // this rep sells (services/rep-rates.server.js)
+    referredBy: { type: String, default: "", index: true },
+    // the ?ref= code of this rep's sign-up link
+    referralCode: { type: String, default: "", index: true },
+    // $ per unit for this rep only; null = follows the default (Settings ->
+    // COMMISSION_PER_UNIT / REFERRAL_COMMISSION_PER_UNIT)
+    directRate: { type: Number, default: null },
+    referralRate: { type: Number, default: null },
+    // $ per unit the rep who REFERRED this rep earns on THIS rep's sales -
+    // set per referral, so one referrer can have a different rate for each
+    // rep they brought in. null = the referrer's referralRate (or default).
+    sponsorRate: { type: Number, default: null },
+    // { <practiceId>: $ per unit } - this rep's direct rate on ONE practice's
+    // orders; a practice not listed uses directRate (or the default)
+    practiceRates: { type: Schema.Types.Mixed, default: {} },
+    applicationId: { type: String, default: "" }, // the signed sign-up it came from
   },
   { timestamps: true },
 );
 export const SalesRep = model("SalesRep", salesRepSchema, "sales_reps");
+
+/* ---------------------------------------------------------------------------
+   Commission change history. One row per change, effective from `effectiveAt`
+   on: an order is paid at the rate in force when it was placed, so older
+   orders keep the rate they had.
+     scope "default": the default direct / referral $ per unit
+     scope "rep":     one rep's own rate (to: null = back on the default), or
+                      kind "referrer" = who referred the rep (from / to = rep ids)
+   --------------------------------------------------------------------------- */
+const commissionChangeSchema = new Schema(
+  {
+    scope: { type: String, required: true }, // default / rep
+    repId: { type: String, default: "", index: true },
+    // direct / referral / referrer / sponsor (per-referral rate, on the referred
+    // rep) / practice:<practiceId> (per-practice direct rate) / name / status
+    kind: { type: String, required: true },
+    from: { type: Schema.Types.Mixed, default: null },
+    to: { type: Schema.Types.Mixed, default: null },
+    effectiveAt: { type: Date, required: true, index: true },
+    by: { type: String, default: "" },
+    note: { type: String, default: "" },
+    notified: { type: Number, default: 0 }, // reps shown a notice about it
+  },
+  { timestamps: true },
+);
+commissionChangeSchema.index({ scope: 1, repId: 1, kind: 1, effectiveAt: 1 });
+export const CommissionChange = model("CommissionChange", commissionChangeSchema, "commission_changes");
+
+/** A message on a sales rep's dashboard (commission changes), until seen. */
+const repNoticeSchema = new Schema(
+  {
+    repId: { type: String, required: true, index: true },
+    title: { type: String, default: "" },
+    message: { type: String, default: "" },
+    changeId: { type: String, default: "" },
+    seenAt: { type: Date, default: null },
+  },
+  { timestamps: true },
+);
+repNoticeSchema.index({ repId: 1, createdAt: -1 });
+export const RepNotice = model("RepNotice", repNoticeSchema, "rep_notices");
+
+/* ---------------------------------------------------------------------------
+   Sales rep sign-ups from a referral link. Pending until an admin approves:
+   approving creates the Shopify login + SalesRep (referredBy = the referrer).
+   The terms text they agreed to is kept word for word with the signature.
+   --------------------------------------------------------------------------- */
+const repApplicationSchema = new Schema(
+  {
+    status: { type: String, default: "Pending", index: true }, // Pending / Approved / Rejected
+    referrerRepId: { type: String, default: "", index: true },
+    referralCode: { type: String, default: "" },
+    firstName: { type: String, default: "" },
+    lastName: { type: String, default: "" },
+    email: { type: String, default: "", index: true },
+    phone: { type: String, default: "" },
+    company: { type: String, default: "" },
+    state: { type: String, default: "" },
+    address: { type: String, default: "" }, // street
+    city: { type: String, default: "" },
+    zip: { type: String, default: "" },
+    agreed: { type: Boolean, default: false },
+    signatureName: { type: String, default: "" },
+    signedAt: { type: Date, default: null },
+    termsVersion: { type: String, default: "" },
+    termsText: { type: String, default: "" },
+    signedHtml: { type: String, default: "" }, // the agreement filled in with their details + signature
+    ip: { type: String, default: "" },
+    userAgent: { type: String, default: "" },
+    repId: { type: String, default: "" }, // set on approval
+    customerId: { type: String, default: "" },
+    reviewedBy: { type: String, default: "" },
+    reviewedAt: { type: Date, default: null },
+    reviewNote: { type: String, default: "" },
+  },
+  { timestamps: true },
+);
+repApplicationSchema.index({ createdAt: -1 });
+export const RepApplication = model("RepApplication", repApplicationSchema, "rep_applications");
 
 /* ---------------------------------------------------------------------------
    Accounts - every portal user (practice master, clinic, physician, sales rep,
@@ -386,6 +494,8 @@ const productSchema = new Schema(
     wholesale: { type: Number, default: 0 },
     physicianCommission: { type: Number, default: 0 },
     clinicCommission: { type: Number, default: 0 },
+    // custom.mfg_cogs - PT Profit reporting only, never pricing (null = unset)
+    mfgCogs: { type: Number, default: null },
     metafields: { type: Schema.Types.Mixed, default: {} },
     sellingPlanGroups: { type: [Schema.Types.Mixed], default: [] },
     // owner ids parsed from product tags (practice private-label copies)

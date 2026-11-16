@@ -12,6 +12,7 @@ import { logEvent } from "./log.server";
 import { getSettings } from "./settings.server";
 import { escQ, gid, gql, legacyId, metafieldsSet, mfNum } from "./shopify-admin.server";
 import { invalidateResponses } from "./response-cache.server";
+import { defaultRateNow, practiceRateFor, rateAt, referralRateFor } from "./rep-rates.server";
 
 /* Per-order commission ledger + month-wise payout summary (was Payouts.gs).
 
@@ -20,9 +21,17 @@ import { invalidateResponses } from "./response-cache.server";
    per-line amounts). Product rates edited later never rewrite history.
 
    PAYOUT CONSOLIDATION: the admin only ever pays the PRACTICE (one combined
-   Doctor + Clinic + Practice amount) or the REP (flat $/unit, always
-   separate). A standalone "Doctor" payout row exists only for the true solo
-   case, where Clinic and Practice both come out to $0. */
+   Doctor + Clinic + Practice amount) or the REP (always separate). A
+   standalone "Doctor" payout row exists only for the true solo case, where
+   Clinic and Practice both come out to $0.
+
+   REPS, two layers ($ per unit, rates in rep-rates.server.js):
+     direct   the rep assigned to the practice earns their direct rate
+     referral the rep who REFERRED that rep earns their referral rate on top
+   Both are paid into each rep's own monthly "Rep" payout. The rates used are
+   the ones in force when the order was placed, frozen on the order.
+
+   PT PROFIT (reporting only) = wholesale - MFG COGS - rep - referral. */
 
 const EMPTY_SPLIT = {
   doctorId: "",
@@ -37,17 +46,15 @@ const EMPTY_SPLIT = {
   lines: [],
 };
 
-/** $ of rep commission per product unit - one flat rate for every rep
- *  (Settings -> COMMISSION_PER_UNIT, $1 when unset). */
+/** Today's default direct rep commission per unit (Settings ->
+ *  COMMISSION_PER_UNIT, $1 when unset). */
 export async function defaultRepCommissionPerUnit() {
-  const v = Number((await getSettings()).COMMISSION_PER_UNIT);
-  return v > 0 ? v : 1;
+  return defaultRateNow("direct");
 }
 
-/** Dollars of rep commission per product unit: the same default for every
- *  rep (there are no per-rep rates). */
-export async function repCommissionPerUnit() {
-  return defaultRepCommissionPerUnit();
+/** Today's direct $ per unit of one rep (their own rate, else the default). */
+export async function repCommissionPerUnit(repId) {
+  return repId ? rateAt(String(repId), "direct", new Date()) : defaultRepCommissionPerUnit();
 }
 
 /**
@@ -69,13 +76,21 @@ export async function repForOrder(ids) {
   await connectDb();
   const reps = await SalesRep.find(
     { assignedPracticeIds: { $in: candidates }, active: { $ne: false } },
-    { repId: 1, name: 1, assignedPracticeIds: 1 },
+    { repId: 1, name: 1, assignedPracticeIds: 1, referredBy: 1, directRate: 1, sponsorRate: 1, practiceRates: 1 },
   ).lean();
   for (const c of candidates) {
     const rep = reps.find((r) => r.assignedPracticeIds.includes(c));
-    if (rep) return { id: rep.repId, name: rep.name || rep.repId };
+    if (rep) return { id: rep.repId, name: rep.name || rep.repId, referredBy: rep.referredBy || "", doc: rep };
   }
   return null;
+}
+
+/** The active rep who referred `rep` (a repForOrder result), or null. */
+async function referrerOf(rep) {
+  const refId = rep?.referredBy;
+  if (!refId || refId === rep.id) return null;
+  const doc = await SalesRep.findOne({ repId: refId, active: { $ne: false } }, { repId: 1, name: 1, referralRate: 1 }).lean();
+  return doc ? { id: doc.repId, name: doc.name || doc.repId, doc } : null;
 }
 
 /**
@@ -126,13 +141,15 @@ export async function commissionRates(productIds) {
   await connectDb();
   const local = await Product.find(
     { productId: { $in: ids } },
-    { productId: 1, wholesale: 1, physicianCommission: 1, clinicCommission: 1, masterKey: 1 },
+    { productId: 1, wholesale: 1, physicianCommission: 1, clinicCommission: 1, masterKey: 1, mfgCogs: 1 },
   ).lean();
   for (const p of local) {
     map[p.productId] = {
       wholesale: p.wholesale || 0,
       physician: p.physicianCommission || 0,
       clinic: p.clinicCommission || 0,
+      cogs: p.mfgCogs ?? null,
+      masterKey: p.masterKey || "",
       key: productKey(p),
     };
   }
@@ -149,6 +166,7 @@ export async function commissionRates(productIds) {
               wholesaleMf: metafield(namespace: "custom", key: "wholsale_price") { value type }
               physicianMf: metafield(namespace: "custom", key: "physician_commission") { value type }
               clinicMf: metafield(namespace: "custom", key: "clinic_commission") { value type }
+              cogsMf: metafield(namespace: "custom", key: "mfg_cogs") { value type }
             }
           }
         }`,
@@ -160,11 +178,26 @@ export async function commissionRates(productIds) {
           wholesale: mfNum(n.wholesaleMf),
           physician: mfNum(n.physicianMf),
           clinic: mfNum(n.clinicMf),
+          cogs: n.cogsMf?.value ? mfNum(n.cogsMf) : null,
+          masterKey: copyMasterKey(n.tags || []),
           key: productKey({ productId: n.id, masterKey: copyMasterKey(n.tags || []) }),
         };
       }
     } catch (err) {
       logEvent("error", "commissionRates", String(err), null, false);
+    }
+  }
+  // A practice's private copy rarely carries MFG COGS - take the master's
+  // (the product with the same rxmaster key that belongs to no practice).
+  const needMaster = [...new Set(Object.values(map).filter((r) => r.cogs == null && r.masterKey).map((r) => r.masterKey))];
+  if (needMaster.length) {
+    const masters = await Product.find(
+      { masterKey: { $in: needMaster }, practiceId: "", mfgCogs: { $ne: null } },
+      { masterKey: 1, mfgCogs: 1 },
+    ).lean();
+    const cogsByKey = Object.fromEntries(masters.map((m) => [m.masterKey, m.mfgCogs]));
+    for (const r of Object.values(map)) {
+      if (r.cogs == null && cogsByKey[r.masterKey] != null) r.cogs = cogsByKey[r.masterKey];
     }
   }
   return map;
@@ -179,13 +212,16 @@ export async function commissionRates(productIds) {
  *   Practice = whatever is left of lineProfit (never negative)
  * No doctor / clinic id on the order: that share is 0 and stays with Practice.
  * SOLO doctor: the doctor gets the full lineProfit.
- * Rep $ is a separate flat rate * total units.
+ * Rep $ = the rep's direct rate * total units; the rep who referred that
+ * rep gets the referral rate for that referral (or their own referral rate)
+ * * total units on top. Both rates are the ones
+ * in force at `at` (when the order was placed).
  *
  * `lineItems` are the order document's line items ({productId, quantity,
  * price, title}). Returns the resolved ids the split is credited to
  * (wholesale ids fill in when the plain ones are blank).
  */
-export async function computeOrderCommission(lineItems, ids) {
+export async function computeOrderCommission(lineItems, ids, { at = new Date() } = {}) {
   if (!lineItems?.length) return { ...EMPTY_SPLIT };
 
   const doctorId = ids.doctorId || ids.wsDoctorId || "";
@@ -199,14 +235,21 @@ export async function computeOrderCommission(lineItems, ids) {
     ? {}
     : await overridesFor(practiceId, { doctorId, clinicId }, Object.values(rates).map((r) => r.key));
 
-  // every rep earns the same flat $/unit
+  // the rep's rate on this practice (else their direct rate), and the
+  // referral rate their referrer earns on this rep's sales (set per
+  // referral, else the referrer's own), as of `at`
   const rep = await repForOrder(ids);
-  const repRate = rep ? await defaultRepCommissionPerUnit() : 0;
+  const repRate = rep ? await practiceRateFor(rep.doc, practiceId, at) : 0;
+  const referrer = rep ? await referrerOf(rep) : null;
+  const refRate = referrer ? await referralRateFor(rep.doc, referrer.doc, at) : 0;
 
   let doctorAmt = 0;
   let clinicAmt = 0;
   let practiceAmt = 0;
   let units = 0;
+  let ptRevenue = 0;
+  let cogs = 0;
+  let cogsMissing = false;
   const lines = lineItems.map((li) => {
     const qty = li.quantity || 1;
     units += qty;
@@ -214,6 +257,12 @@ export async function computeOrderCommission(lineItems, ids) {
     const mf = rates[String(li.productId)] || { wholesale: 0, physician: 0, clinic: 0 };
     const wholesale = Number(mf.wholesale) || 0;
     const lineProfit = Math.max(0, (sell - wholesale) * qty);
+    // PT keeps the wholesale price of every unit (all of it on a wholesale
+    // order, where sell = wholesale)
+    const unitCogs = mf.cogs == null || isNaN(Number(mf.cogs)) ? null : Number(mf.cogs);
+    ptRevenue += Math.min(sell, wholesale) * qty;
+    if (unitCogs === null) cogsMissing = true;
+    else cogs += unitCogs * qty;
 
     let d, c, p;
     if (solo) {
@@ -242,11 +291,13 @@ export async function computeOrderCommission(lineItems, ids) {
       physicianRate: d / qty,
       clinicRate: c / qty,
       wholesale,
+      cogs: unitCogs,
     };
   });
 
   // frozen on the order from here on
   const repAmt = rep ? units * repRate : 0;
+  const refAmt = referrer ? units * refRate : 0;
 
   return {
     doctorId,
@@ -257,6 +308,14 @@ export async function computeOrderCommission(lineItems, ids) {
     practiceAmt: round2(practiceAmt),
     repId: rep ? rep.id : "",
     repAmt: round2(repAmt),
+    repRate: rep ? repRate : null,
+    refRepId: referrer ? referrer.id : "",
+    refRate: referrer ? refRate : 0,
+    refAmt: round2(refAmt),
+    ptRevenue: round2(ptRevenue),
+    cogs: round2(cogs),
+    cogsMissing,
+    ptProfit: round2(ptRevenue - cogs - repAmt - refAmt),
     solo,
     lines,
   };
@@ -405,6 +464,10 @@ async function applySplitToPayouts(month, c, sign) {
   if (c.repId && c.repAmt > 0) {
     await adjustMonthlyPayout(month, "Rep", c.repId, sign * c.repAmt);
   }
+  // the referring rep's share goes into THEIR own monthly rep payout
+  if (c.refRepId && c.refAmt > 0) {
+    await adjustMonthlyPayout(month, "Rep", c.refRepId, sign * c.refAmt);
+  }
 }
 
 /**
@@ -431,8 +494,8 @@ export async function recordOrderPayoutIfNew(order, ids) {
     const fresh = await Order.findOne({ orderId: order.orderId }).lean();
     if (!fresh || fresh.commission?.logged) return false;
 
-    const split = await computeOrderCommission(fresh.lineItems, ids);
-    if (!split.doctorAmt && !split.clinicAmt && !split.practiceAmt && !split.repAmt) {
+    const split = await computeOrderCommission(fresh.lineItems, ids, { at: fresh.orderCreatedAt || new Date() });
+    if (!split.doctorAmt && !split.clinicAmt && !split.practiceAmt && !split.repAmt && !split.refAmt) {
       return false;
     }
 
@@ -446,6 +509,7 @@ export async function recordOrderPayoutIfNew(order, ids) {
       physicianRate: split.lines[i]?.physicianRate || 0,
       clinicRate: split.lines[i]?.clinicRate || 0,
       wholesale: split.lines[i]?.wholesale || 0,
+      cogs: split.lines[i]?.cogs ?? null,
     }));
 
     // Claim the "logged" flag atomically - only the winner counts the split.
@@ -466,6 +530,14 @@ export async function recordOrderPayoutIfNew(order, ids) {
             practiceAmt: split.practiceAmt,
             repId: split.repId,
             repAmt: split.repAmt,
+            repRate: split.repRate,
+            refRepId: split.refRepId,
+            refRate: split.refRate,
+            refAmt: split.refAmt,
+            ptRevenue: split.ptRevenue,
+            cogs: split.cogs,
+            cogsMissing: split.cogsMissing,
+            ptProfit: split.ptProfit,
             solo: split.solo,
             counted: "Yes",
             month,
@@ -556,6 +628,7 @@ export async function rebuildMonthlyPayouts({ dryRun = true } = {}) {
       add(c.month, "Doctor", c.doctorId, c.doctorAmt);
     }
     if (c.repId && c.repAmt > 0) add(c.month, "Rep", c.repId, c.repAmt);
+    if (c.refRepId && c.refAmt > 0) add(c.month, "Rep", c.refRepId, c.refAmt);
   }
 
   // a month can hold several records (paid ones + the open one): compare
@@ -591,7 +664,8 @@ export async function rebuildMonthlyPayouts({ dryRun = true } = {}) {
 }
 
 /**
- * Recomputes ONE logged order's split at today's product rates. Admin-only,
+ * Recomputes ONE logged order's split at today's product rates (rep rates:
+ * the ones in force when the order was placed). Admin-only,
  * run by hand; moves the payout summary by the difference so the two stay in
  * step.
  */

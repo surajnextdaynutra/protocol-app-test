@@ -181,6 +181,10 @@ export function orderView(o) {
     wholesaleRole: o.wholesaleRole || "",
     repId: o.commission?.repId || "",
     repAmount: o.commission?.repAmt || 0,
+    repRate: o.commission?.repRate ?? null,
+    refRepId: o.commission?.refRepId || "",
+    refAmount: o.commission?.refAmt || 0,
+    refRate: o.commission?.refRate || 0,
     demo: !!o.demo,
     tags: o.tags || [],
   };

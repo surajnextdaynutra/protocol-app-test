@@ -24,6 +24,7 @@ const MF_KEYS = [
   "physician_commission",
   "clinic_commission",
   "peptides_support_keywords",
+  "mfg_cogs", // PT Profit reporting only (never pricing)
 ];
 
 const PRODUCT_FIELDS = `#graphql
@@ -118,6 +119,7 @@ function productDoc(n) {
     wholesale: mfNumber(mf("wholsale_price")) || 0,
     physicianCommission: mfNumber(mf("physician_commission")) || 0,
     clinicCommission: mfNumber(mf("clinic_commission")) || 0,
+    mfgCogs: mfNumber(mf("mfg_cogs")),
     metafields: {
       msrpLow: mfNumber(mf("msrp_low")),
       msrpHigh: mfNumber(mf("msrp_high")),

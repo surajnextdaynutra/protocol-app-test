@@ -1,5 +1,6 @@
 import { connectDb } from "../db.server";
 import { Account, Counter, DemoAccount, Product, SalesRep } from "../models/index.server";
+import { setReferrer } from "./rep-rates.server";
 import { removeAccount, roleFromTags, upsertAccount } from "./accounts.server";
 import { MasterProduct, ensurePracticeCopies, practiceCopiesStatus, removePracticeCopiesIfUnused, setPracticeProducts } from "./catalog.server";
 import { DOCTOR_TAG, clearDemoCache, idsFromCustomerTags, tagVal } from "./ids.server";
@@ -449,7 +450,15 @@ export async function createPortalAccount(input) {
   // Sales-rep bookkeeping. Failures here never undo the created customer.
   try {
     if (role === "Sales Rep") {
-      await upsertSalesRep(tagVal(tags, "rep_id:"), { name: `${firstName} ${lastName}`.trim(), email, customerId });
+      const newRepId = tagVal(tags, "rep_id:");
+      await upsertSalesRep(newRepId, { name: `${firstName} ${lastName}`.trim(), email, customerId });
+      // optional: the rep who referred this one (earns the referral rate on their sales)
+      if (input.referredBy) {
+        const ref = await resolveSalesRep(input.referredBy);
+        if (!ref) throw new Error(`referring sales rep "${input.referredBy}" not found`);
+        const r = await setReferrer(newRepId, ref.repId, { by: "Shopify admin (Accounts)", note: "Set when the account was created" });
+        if (!r.ok) throw new Error(r.error);
+      }
     } else if (input.repId) {
       // an id or the rep's email both work
       const rep = await resolveSalesRep(input.repId);

@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Form, useActionData, useLoaderData } from "@remix-run/react";
 import { BlockStack, Button, Card, FormLayout, InlineStack, Page, Text, TextField } from "@shopify/polaris";
 
 import { ActionResult, useBusy } from "../components/admin";
+import { TermsFrame } from "../components/terms-frame";
 import { listCounters, setCounter } from "../services/provisioning.server";
+import { DEFAULT_RATE_KEYS, setDefaultRate } from "../services/rep-rates.server";
 import { listSettings, setSetting } from "../services/settings.server";
 import { authenticate } from "../shopify.server";
 
@@ -17,6 +19,7 @@ const GROUPS = [
   ["brevo", "Brevo"],
   ["forms", "Website forms"],
   ["commission", "Commission"],
+  ["repsignup", "Sales rep sign-up"],
   ["products", "Product copies"],
   ["demo", "Demo accounts"],
 ];
@@ -50,11 +53,55 @@ export const action = async ({ request }) => {
     if (!k.startsWith("s:")) continue;
     const key = k.slice(2);
     if (secretKeys.has(key) && !String(v).trim()) continue; // blank = keep the stored secret
+    if (DEFAULT_RATE_KEYS[key]) {
+      // a default rep rate: recorded in the history and shown to the reps on
+      // that default (unchanged value = nothing happens)
+      const res = await setDefaultRate(DEFAULT_RATE_KEYS[key], v, { by: "Shopify admin (Settings)" });
+      if (!res.ok) return { ok: false, message: `${key}: ${res.error}` };
+      if (res.changed) n++;
+      continue;
+    }
     await setSetting(key, v);
     n++;
   }
   return { ok: true, message: `Saved ${n} setting(s).` };
 };
+
+/** Under a *_TERMS setting: load the text from an .html / .txt file, and
+ *  preview it exactly as the sign-up popup shows it. Nothing is stored until
+ *  the group's Save button is pressed. */
+function TermsTools({ value, onChange }) {
+  const inputRef = useRef(null);
+  const [preview, setPreview] = useState(false);
+  const [note, setNote] = useState("");
+  const onFile = (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) { setNote("That file is over 2 MB - please use a smaller file."); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      onChange(String(reader.result || "").trim());
+      setPreview(true);
+      setNote(`Loaded "${file.name}". Check the preview, then press Save.`);
+    };
+    reader.onerror = () => setNote("Could not read that file.");
+    reader.readAsText(file);
+  };
+  return (
+    <BlockStack gap="200">
+      <InlineStack gap="200" blockAlign="center">
+        <input ref={inputRef} type="file" accept=".html,.htm,.txt,text/html,text/plain" onChange={onFile} style={{ display: "none" }} />
+        <Button onClick={() => inputRef.current && inputRef.current.click()}>Upload HTML file</Button>
+        <Button onClick={() => setPreview((p) => !p)} disabled={!String(value || "").trim()}>
+          {preview ? "Hide preview" : "Preview"}
+        </Button>
+        {note ? <Text as="span" tone="subdued" variant="bodySm">{note}</Text> : null}
+      </InlineStack>
+      {preview && String(value || "").trim() ? <TermsFrame terms={value} height={380} /> : null}
+    </BlockStack>
+  );
+}
 
 function Group({ title, rows, busy }) {
   const [values, setValues] = useState(Object.fromEntries(rows.map((r) => [r.key, r.value])));
@@ -66,8 +113,8 @@ function Group({ title, rows, busy }) {
         <FormLayout>
           <Text as="h2" variant="headingMd">{title}</Text>
           {rows.map((r) => {
-            const long = String(r.value).length > 70 || /_BODY$|_JSON$/.test(r.key);
-            return (
+            const long = String(r.value).length > 70 || /_BODY$|_JSON$|_TERMS$/.test(r.key);
+            const field = (
               <TextField
                 key={r.key}
                 label={r.key}
@@ -76,10 +123,18 @@ function Group({ title, rows, busy }) {
                 onChange={(v) => setValues((s) => ({ ...s, [r.key]: v }))}
                 helpText={r.notes}
                 multiline={long ? 4 : false}
+                maxHeight={/_TERMS$/.test(r.key) ? 260 : undefined}
                 type={r.secret ? "password" : "text"}
                 placeholder={r.secret && r.hasValue ? "•••••••• (saved - leave blank to keep)" : undefined}
                 autoComplete="off"
               />
+            );
+            if (!/_TERMS$/.test(r.key)) return field;
+            return (
+              <BlockStack key={r.key} gap="200">
+                {field}
+                <TermsTools value={values[r.key]} onChange={(v) => setValues((s) => ({ ...s, [r.key]: v }))} />
+              </BlockStack>
             );
           })}
           <InlineStack>

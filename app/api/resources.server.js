@@ -27,6 +27,21 @@ import {
 import { practiceDashboard, practicePeriodOrders } from "../services/dashboards/practice.server";
 import { repBankingSave, repDashboard } from "../services/dashboards/rep.server";
 import {
+  applicationTerms,
+  approveApplication,
+  commissionsOverview,
+  financeActor,
+  rejectApplication,
+  setDefaultRate,
+  setReferrer,
+  setRepRate,
+  setSponsorRate,
+} from "../services/exec-commissions.server";
+import { markNoticesSeen, rowHistory, saveRepRow } from "../services/rep-rates.server";
+import { repCommissionUpdates, repEarningHistory, repEarnings } from "../services/rep-earnings.server";
+import { signupInfo, submitSignup } from "../services/rep-signup.server";
+import { repTeam } from "../services/rep-team.server";
+import {
   clinicDoctors,
   clinicInfo,
   practiceAccountInfo,
@@ -362,6 +377,30 @@ const rep = {
     requireRep(caller, p);
     return repBankingSave(p, caller.customerId);
   },
+  // "My Team": rates, referral link, referred reps, referral orders, notices
+  team: ({ p, caller }) => {
+    requireRep(caller, p);
+    return repTeam(p);
+  },
+  noticesSeen: ({ p, caller }) => {
+    requireRep(caller, p);
+    return markNoticesSeen(String(p.rep).trim(), p.ids || []);
+  },
+  // Dashboard Referral table + Earnings table (From / To window)
+  earnings: ({ p, caller }) => {
+    requireRep(caller, p);
+    return repEarnings(p);
+  },
+  // History popup of one Earnings row (practice / referred rep)
+  earningHistory: ({ p, caller }) => {
+    requireRep(caller, p);
+    return repEarningHistory(p);
+  },
+  // commission-change alert + "Commission Updates" popup
+  commissionUpdates: ({ p, caller }) => {
+    requireRep(caller, p);
+    return repCommissionUpdates(p);
+  },
 };
 
 /* ----------------------------- finance dashboard ------------------------ */
@@ -386,6 +425,60 @@ const finance = {
   uploadPayoutsCsv: ({ p, caller }) => {
     requireFinance(caller);
     return uploadPayoutsCsv(p);
+  },
+  /* ---- Commissions (executive): rates, history, referral tree, sign-ups, PT Profit ---- */
+  commissions: ({ caller }) => {
+    requireFinance(caller);
+    return commissionsOverview();
+  },
+  setDefaultRate: async ({ p, caller }) => {
+    requireFinance(caller);
+    return setDefaultRate(String(p.kind || ""), p.value, { by: await financeActor(caller), note: p.note });
+  },
+  setRepRate: async ({ p, caller }) => {
+    requireFinance(caller);
+    return setRepRate(String(p.rep || ""), String(p.kind || ""), p.value, { by: await financeActor(caller), note: p.note });
+  },
+  // Sales Reps view: History / Edit popups of one row (rep, practice, referred rep)
+  repRowHistory: ({ p, caller }) => {
+    requireFinance(caller);
+    return rowHistory({ type: String(p.type || "rep"), repId: String(p.rep || ""), practiceId: String(p.practice || ""), childId: String(p.child || "") });
+  },
+  saveRepRow: async ({ p, caller }) => {
+    requireFinance(caller);
+    return saveRepRow(p, { by: await financeActor(caller) });
+  },
+  // the referral rate for ONE referral (what p.rep's referrer earns on p.rep's sales)
+  setSponsorRate: async ({ p, caller }) => {
+    requireFinance(caller);
+    return setSponsorRate(String(p.rep || ""), p.value, { by: await financeActor(caller), note: p.note });
+  },
+  setReferrer: async ({ p, caller }) => {
+    requireFinance(caller);
+    return setReferrer(String(p.rep || ""), String(p.referrer || ""), { by: await financeActor(caller), note: p.note });
+  },
+  signupTerms: ({ p, caller }) => {
+    requireFinance(caller);
+    return applicationTerms(String(p.id || ""));
+  },
+  approveSignup: async ({ p, caller }) => {
+    requireFinance(caller);
+    return approveApplication(String(p.id || ""), { by: await financeActor(caller) });
+  },
+  rejectSignup: async ({ p, caller }) => {
+    requireFinance(caller);
+    return rejectApplication(String(p.id || ""), { by: await financeActor(caller), note: p.note });
+  },
+};
+
+/* ------------------- sales rep sign-up (referral link) ------------------ */
+// Public: the applicant is not logged in yet.
+const repsignup = {
+  ping: ping("rx-rep-signup"),
+  info: ({ p }) => signupInfo({ ref: p.ref }),
+  submit: ({ p, request, method }) => {
+    if (method !== "POST") throw new ApiError("Use POST.", 405);
+    return submitSignup(p, request);
   },
 };
 
@@ -521,6 +614,7 @@ const pricing = {
 };
 
 export const resources = {
+  repsignup,
   about,
   form,
   support,

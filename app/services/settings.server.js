@@ -71,7 +71,12 @@ export const SETTINGS_DEFAULTS = [
   ["BREVO_DEAL_ATTRIBUTES_JSON", "", 'Optional JSON map of form field -> Brevo deal attribute internal name, e.g. {"practiceName":"practice_name"}.', "forms"],
   // --- commission
   ["COMMISSION_PERCENT", "5", "Default commission % of purchased order totals, used when a provider has no commission:X tag override", "commission"],
-  ["COMMISSION_PER_UNIT", "1", "Sales rep commission in dollars per product unit sold - the same for every rep.", "commission"],
+  ["COMMISSION_PER_UNIT", "1", "Default sales rep commission in dollars per unit the rep sells (direct sales). A rep with their own rate on the Sales reps page keeps it. A change applies to orders placed from then on and is shown on the affected reps' dashboards.", "commission"],
+  ["REFERRAL_COMMISSION_PER_UNIT", "0.20", "Default referral commission in dollars per unit: what a rep earns on every unit sold by a rep they referred. Same rules as COMMISSION_PER_UNIT.", "commission"],
+  // --- sales rep sign-up (referral link)
+  ["REP_SIGNUP_ENABLED", "TRUE", "TRUE/FALSE - accept new sales rep sign-ups from referral links (page /pages/rep-signup).", "repsignup"],
+  ["REP_SIGNUP_TERMS", "", "The Terms & Conditions an applicant must agree to and sign in the sign-up popup. Plain text (line breaks are kept) or HTML - use Upload HTML file to load an .html file, then Save. Scripts in the HTML never run. Sign-up stays closed while this is empty. Each signed application keeps the exact text it was signed against.", "repsignup"],
+  ["REP_SIGNUP_NOTIFY_EMAIL", "", "Where new sales rep sign-ups are emailed for approval. Blank = SALES_EMAIL.", "repsignup"],
   // --- product copies
   ["PRODUCT_SYNC_DELETE_ORPHANS", "FALSE", "TRUE = when a practice's last portal account is removed, delete that practice's product copies (after it has been missing on two sync runs). FALSE = only report them on the Products page.", "products"],
   ["LOCATION_ID", "", "Shopify inventory location id used for shared inventory. Blank = the store's primary location. Changing it re-stocks every copy at the new location from the master list.", "products"],

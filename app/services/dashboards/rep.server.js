@@ -39,6 +39,21 @@ function repOrder(o) {
   };
 }
 
+/** Referral commission this rep earned in the window: { total, open (this month) }. */
+async function referralEarnings(repId, fromMs, toMs, timeZone) {
+  const rows = await findOrders({ "commission.refRepId": repId }, { fromMs, toMs, limit: 20000 });
+  const openKey = monthKey(new Date(), timeZone);
+  let total = 0;
+  let open = 0;
+  for (const o of rows) {
+    if (o.financialStatus !== "PAID") continue; // same rule as the direct earnings
+    const amt = o.refAmount || 0;
+    total += amt;
+    if (o.ts && monthKey(new Date(o.ts), timeZone) === openKey) open += amt;
+  }
+  return { total: Math.round(total * 100) / 100, open: Math.round(open * 100) / 100 };
+}
+
 export async function repAssignedPractices(repId) {
   await connectDb();
   const rep = await SalesRep.findOne({ repId }, { assignedPracticeIds: 1 }).lean();
@@ -138,11 +153,14 @@ export async function repDashboard({
     doctorOptions: [],
     clinicOptions: [],
     practiceOptions: [],
-    commission: { total: 0, paid: 0, pending: 0, ratePerUnit: perUnit },
+    commission: { total: 0, paid: 0, pending: 0, ratePerUnit: perUnit, direct: 0, referral: 0 },
   };
 
   const finishEmpty = async () => {
     buildSeries(out, days, now, days === 0 || days > 90, {});
+    const ref = await referralEarnings(rep, cutoff, cutoffTo, cfg.TIMEZONE);
+    out.commission.referral = ref.total;
+    out.commission.total = ref.total;
     const pay = await repPayouts(rep);
     out.commission.paid = pay.paid;
     out.commission.open = 0;
@@ -554,6 +572,13 @@ export async function repDashboard({
 
   ordersArr.sort((a, b) => b.ts - a.ts);
   out.orders = ordersArr.slice(0, 100);
+
+  // referral layer: what the reps this rep referred sold (frozen per order)
+  out.commission.direct = commissionAllTime;
+  const ref = await referralEarnings(rep, cutoff, cutoffTo, cfg.TIMEZONE);
+  out.commission.referral = ref.total;
+  commissionAllTime += ref.total;
+  commissionOpen += ref.open;
 
   const pay = await repPayouts(rep);
   // this month's commission not paid yet - a payment made mid-month covers

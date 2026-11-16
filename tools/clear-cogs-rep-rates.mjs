@@ -1,5 +1,7 @@
-/* Removes the MFG COGS and per-rep commission data that is no longer used:
-     products.mfgCogs                  (mirrored custom.mfg_cogs)
+/* Removes leftover data of the reverted COGS-based wholesale PRICING:
+     (products.mfgCogs is NOT touched - since 2026-11-12 it feeds the PT
+      Profit report; sales_reps.directRate / referralRate are the new
+      per-rep commission rates and are not touched either)
      master_products.row["MFG COGS"]   (the master list column)
      sales_reps.commissionPerUnit      (every rep now earns COMMISSION_PER_UNIT)
    Orders already paid keep the commission frozen on them - not touched.
@@ -16,7 +18,6 @@ if (!uri) { console.error("MONGODB_URI not found in .env"); process.exit(1); }
 await mongoose.connect(uri);
 const db = mongoose.connection.db;
 const jobs = [
-  { col: "products", field: "mfgCogs" },
   { col: "master_products", field: "row.MFG COGS" },
   { col: "sales_reps", field: "commissionPerUnit" },
 ];

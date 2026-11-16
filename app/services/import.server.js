@@ -11,7 +11,7 @@ import {
   SalesRep,
 } from "../models/index.server";
 import { encryptJson } from "./crypto.server";
-import { MasterProduct, saveMaster } from "./catalog.server";
+import { MASTER_COLUMNS, MasterProduct, saveMaster } from "./catalog.server";
 import { clearDemoCache, parseAmount } from "./ids.server";
 import { logEvent } from "./log.server";
 import { setSetting } from "./settings.server";
@@ -389,10 +389,23 @@ const importers = {
 async function importMasters(csvText) {
   const rows = parseCsv(csvText);
   if (rows.length < 2) return { rows: 0, imported: 0 };
-  const headers = rows[0].map((h) => String(h || "").trim());
+  // Headers match the product columns case-insensitively; "Product Name" /
+  // "Product" / "Name" mean Title (a sheet export rarely says "Title").
+  const known = new Map(MASTER_COLUMNS.map((c) => [c.toLowerCase(), c]));
+  for (const alias of ["product name", "product", "name", "product title"]) known.set(alias, "Title");
+  const headers = rows[0].map((h) => {
+    const t = String(h || "").trim();
+    return known.get(t.toLowerCase()) || t;
+  });
   // A file without the full sheet's columns (e.g. just Title + Wholsale Price) only
   // UPDATES existing masters - it never creates a product from a half row.
   const fullSheet = headers.includes("Price");
+  // ...and only the product's own columns are taken from it (a stray sheet
+  // column like "Mark-Up" is reported, not saved onto the product)
+  const ignored = fullSheet ? [] : headers.filter((h) => h && !known.has(h.toLowerCase()));
+  if (!headers.includes("Title") && !headers.includes("Master Key")) {
+    return { rows: rows.length - 1, imported: 0, notFound: [], ignored, noNameColumn: true };
+  }
   const masters = await MasterProduct.find({}, { masterKey: 1, row: 1 }).lean();
   const byKey = new Map(masters.map((m) => [m.masterKey.toLowerCase(), m]));
   const byTitle = new Map(masters.map((m) => [String(m.row?.Title || "").trim().toLowerCase(), m]));
@@ -401,9 +414,11 @@ async function importMasters(csvText) {
   for (const r of rows.slice(1)) {
     const row = {};
     headers.forEach((h, i) => {
-      if (h) row[h] = String(r[i] ?? "").trim();
+      if (h && !ignored.includes(h)) row[h] = String(r[i] ?? "").trim();
     });
     if (!row["Master Key"] && !row["Title"]) continue;
+    // a blank cell in a partial file means "not given" - it keeps the saved value
+    if (!fullSheet) for (const k of Object.keys(row)) if (row[k] === "") delete row[k];
     const existing =
       byKey.get(String(row["Master Key"] || "").toLowerCase()) ||
       byTitle.get(String(row["Title"] || "").trim().toLowerCase());
@@ -415,7 +430,7 @@ async function importMasters(csvText) {
     await saveMaster(existing ? { ...existing.row, ...row, "Master Key": existing.masterKey } : row);
     imported++;
   }
-  return { rows: rows.length - 1, imported, notFound };
+  return { rows: rows.length - 1, imported, notFound, ignored };
 }
 
 export const IMPORT_KINDS = [
@@ -436,7 +451,9 @@ export async function importCsv(kind, csvText) {
   await connectDb();
   if (kind === "masters") {
     const res = await importMasters(csvText);
-    const missed = res.notFound?.length ? ` not found (no such product - check the name): ${res.notFound.join(", ")}` : "";
+    let missed = res.notFound?.length ? ` not found (no such product - check the name): ${res.notFound.join(", ")}` : "";
+    if (res.noNameColumn) missed += " no Title / Product Name / Master Key column - nothing could be matched";
+    if (res.ignored?.length) missed += ` ignored columns (not product fields): ${res.ignored.join(", ")}`;
     logEvent("job", "import:masters", `rows=${res.rows} imported=${res.imported}${missed}`, null, !missed);
     return res.rows ? { ok: true, ...res } : { ok: false, error: "No data rows found in the file." };
   }

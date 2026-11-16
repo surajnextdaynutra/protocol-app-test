@@ -26,14 +26,15 @@ const CACHEABLE = {
   practice: ["dashboard", "products", "earnings", "practiceInfo", "clinicInfo", "practiceAccountInfo", "payoutOrders", "getAccount"],
   physician: ["dashboard", "practiceInfo", "clinicName", "payoutOrders", "products", "getAccount"],
   clinic: ["dashboard", "getAccount"],
-  rep: ["repdash"],
-  finance: ["admindash", "orderDetail"],
+  rep: ["repdash", "team", "earnings", "earningHistory", "commissionUpdates"],
+  finance: ["admindash", "orderDetail", "commissions", "repRowHistory"],
+  repsignup: ["info"],
   account: ["getAccount", "orderHistory"],
   about: ["aboutUsLoad", "aboutUsPublic"],
   physicians: ["customers", "refLookup"],
 };
 // reads that are never cached (banking) still don't clear the cache
-const READ_ONLY = new Set([...Object.values(CACHEABLE).flat(), "ping", "load", "bankingLoad", "guardcheck"]);
+const READ_ONLY = new Set([...Object.values(CACHEABLE).flat(), "ping", "load", "bankingLoad", "guardcheck", "signupTerms"]);
 // Shopify's per-request signing params (they change every call) and tokens
 const KEY_SKIP = new Set(["signature", "timestamp", "path_prefix", "shop", "logged_in_customer_id", "token", "secret", "_", "t"]);
 

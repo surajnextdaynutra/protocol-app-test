@@ -190,6 +190,7 @@ const HELP = {
   Metafields: 'Optional JSON: [{"namespace":"custom","key":"…","type":"…","value":"…"}]',
   Images: "Comma-separated image URLs; the first is the featured image.",
   "MSRP Low": "A practice copy launches at this price.",
+  "MFG COGS": "Manufacturing cost per unit. Used only for the PT Profit report - it never changes a price. Saved to custom.mfg_cogs on the base product and every copy.",
   "Related Categories": "Separate values with a pipe |",
   Highlights: "Separate values with a pipe |",
   "Formulation Features": "Comma-separated file URLs.",

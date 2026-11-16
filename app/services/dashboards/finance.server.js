@@ -14,6 +14,7 @@ import {
   setPayoutRecordStatus,
 } from "../commission.server";
 import { decryptJson } from "../crypto.server";
+import { currentRates } from "../rep-rates.server";
 import { demoIdSet } from "../ids.server";
 import { kvGet, kvSet, logEvent } from "../log.server";
 import { gid, gql } from "../shopify-admin.server";
@@ -192,8 +193,24 @@ export async function financeDashboard(p) {
 
   const logged = await Order.find(
     { "commission.logged": true, "commission.status": { $ne: "Deleted" }, demo: { $ne: true } },
-    { name: 1, orderCreatedAt: 1, commission: 1, deliveryStatus: 1, total: 1, wholesaleRole: 1, wsDoctorId: 1, wsClinicId: 1, wsPracticeId: 1 },
+    { name: 1, orderCreatedAt: 1, commission: 1, deliveryStatus: 1, total: 1, units: 1, wholesaleRole: 1, wsDoctorId: 1, wsClinicId: 1, wsPracticeId: 1 },
   ).lean();
+  // Sales Reps view: each rep's commissioned orders per practice, and the
+  // referral commission each rep earns from each rep they referred
+  const repStats = {};
+  const addRepStats = (o, c) => {
+    if (c.repId && !isGone(c.repId)) {
+      const s = ((repStats[c.repId] ||= { byPrac: {}, byChild: {} }).byPrac[c.practiceId || ""] ||= { orders: 0, units: 0, total: 0, comm: 0 });
+      s.orders++;
+      s.units += o.units || 0;
+      s.total += o.total || 0;
+      s.comm += c.repAmt || 0;
+    }
+    if (c.refRepId && c.refAmt && c.repId && !isGone(c.refRepId)) {
+      const b = (repStats[c.refRepId] ||= { byPrac: {}, byChild: {} }).byChild;
+      b[c.repId] = (b[c.repId] || 0) + c.refAmt;
+    }
+  };
   const ledger = logged.filter(
     (o) => !isDemoId(o.commission.doctorId, o.commission.clinicId, o.commission.practiceId),
   );
@@ -233,9 +250,11 @@ export async function financeDashboard(p) {
     if (fPractice && practiceId !== fPractice) continue;
     if (fClinic && clinicId !== fClinic) continue;
     if (fDoctor && doctorId !== fDoctor) continue;
+    addRepStats(o, c);
     if (isWholesaleOrder(o)) {
       hiddenOrders.add(o.name);
       if (c.repId && !isGone(c.repId)) ensureRep(c.repId).earned += c.repAmt;
+      if (c.refRepId && c.refAmt && !isGone(c.refRepId)) ensureRep(c.refRepId).earned += c.refAmt;
       continue;
     }
     const lineTotal = c.doctorAmt + c.clinicAmt + c.practiceAmt;
@@ -288,6 +307,12 @@ export async function financeDashboard(p) {
       rp.orders++;
       rp.revenue += lineTotal;
       rp.earned += c.repAmt;
+    }
+    // referral layer: the referring rep's share of this order
+    if (c.refRepId && c.refAmt && !isGone(c.refRepId)) {
+      const rr = ensureRep(c.refRepId);
+      rr.earned += c.refAmt;
+      rr.referralEarned = (rr.referralEarned || 0) + c.refAmt;
     }
     orders.push({
       order: o.name,
@@ -552,33 +577,85 @@ export async function financeDashboard(p) {
   }
   const assignedByRep = Object.fromEntries(salesReps.map((r) => [r.repId, r.assignedPracticeIds || []]));
   const defaultRepRate = await defaultRepCommissionPerUnit();
+  const repDocs = Object.fromEntries(salesReps.map((r) => [r.repId, r]));
+  const ratesOf = {};
+  for (const id of Object.keys(byRep)) ratesOf[id] = await currentRates(repDocs[id] || null);
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  const childrenOf = {};
+  for (const r of salesReps) if (r.referredBy && !isGone(r.repId)) (childrenOf[r.referredBy] ||= []).push(r.repId);
   const reps = Object.values(byRep)
     .map((rp) => {
-      const repPractices = (assignedByRep[rp.id] || [])
-        .filter((x) => !/^CLN/i.test(String(x)) && !isGone(x))
-        .map((pid) => {
-          const pr = byPrac[pid];
-          const doctorCount = pr ? Object.keys(pr.doctorSet).length : 0;
-          const clinicCount = pr ? Object.keys(pr.clinicSet).length : 0;
-          return {
-            id: pid, name: practiceName(pid),
-            orders: pr ? pr.orders : 0, revenue: pr ? pr.revenue : 0,
-            totalPhysicians: docsByPractice[pid] || 0,
-            isPhysicianOwned: doctorCount === 1 && clinicCount === 0,
-          };
-        });
+      const st = repStats[rp.id] || { byPrac: {}, byChild: {} };
+      const directRate = ratesOf[rp.id]?.direct ?? defaultRepRate;
+      const ownPracRates = repDocs[rp.id]?.practiceRates || {};
+      // assigned practices, plus any practice this rep still has commission on
+      const pids = [...new Set([
+        ...(assignedByRep[rp.id] || []).filter((x) => !/^CLN/i.test(String(x))),
+        ...Object.keys(st.byPrac).filter(Boolean),
+      ])].filter((x) => !isGone(x));
+      const repPractices = pids.map((pid) => {
+        const pr = byPrac[pid];
+        const s = st.byPrac[pid] || { orders: 0, units: 0, total: 0, comm: 0 };
+        const doctorCount = pr ? Object.keys(pr.doctorSet).length : 0;
+        const clinicCount = pr ? Object.keys(pr.clinicSet).length : 0;
+        const own = ownPracRates[pid];
+        return {
+          id: pid, name: practiceName(pid),
+          orders: pr ? pr.orders : 0, revenue: pr ? pr.revenue : 0,
+          totalPhysicians: docsByPractice[pid] || 0,
+          isPhysicianOwned: doctorCount === 1 && clinicCount === 0,
+          // Sales Reps view: this rep's numbers on this practice
+          rate: own === null || own === undefined ? directRate : r2(own),
+          rateOwn: !(own === null || own === undefined),
+          commission: r2(s.comm), repOrders: s.orders, units: s.units, orderTotal: r2(s.total),
+          // the practice's own commission / payouts
+          practiceEarned: r2(pr?.earned), practicePaid: r2(pr?.paid), practicePending: r2(pr?.pending),
+        };
+      });
       const sum = (k) => repPractices.reduce((s, pr) => s + pr[k], 0);
+      const all = Object.values(st.byPrac);
+      const directCommission = r2(all.reduce((s, x) => s + x.comm, 0));
       const repEmail = String(repInfo[rp.id]?.email || "").toLowerCase();
       return {
         id: rp.id, name: rp.name, orders: sum("orders"), revenue: sum("revenue"),
         newClients: referrals.byEmail[repEmail] || referrals.byName[String(rp.name || "").toLowerCase()] || 0,
         totalPhysicians: sum("totalPhysicians"),
         earned: rp.earned, paid: rp.paid, pending: rp.pending, practices: repPractices,
-        // $ per unit - the same flat rate for every rep
-        ratePerUnit: defaultRepRate,
+        referralEarned: Math.round((rp.referralEarned || 0) * 100) / 100,
+        // $ per unit today: the rep's own rate, else the default
+        ratePerUnit: directRate,
+        rateIsDefault: ratesOf[rp.id]?.directDefault ?? true,
+        referralRatePerUnit: ratesOf[rp.id]?.referral ?? null,
+        referredBy: repDocs[rp.id]?.referredBy || "",
+        active: repDocs[rp.id] ? repDocs[rp.id].active !== false : true,
+        // Sales Reps view totals
+        repOrders: all.reduce((s, x) => s + x.orders, 0),
+        units: all.reduce((s, x) => s + x.units, 0),
+        orderTotal: r2(all.reduce((s, x) => s + x.total, 0)),
+        directCommission,
+        referralCommission: r2(Object.values(st.byChild).reduce((s, x) => s + x, 0)),
+        byChild: st.byChild,
       };
     })
     .sort((a, b) => b.earned - a.earned);
+  // the reps each rep referred, with the rate their referrer earns on them
+  const repById = Object.fromEntries(reps.map((r) => [r.id, r]));
+  for (const r of reps) {
+    r.referred = (childrenOf[r.id] || []).filter((cid) => repById[cid]).map((cid) => {
+      const c = repById[cid];
+      const own = repDocs[cid]?.sponsorRate;
+      return {
+        id: cid, name: c.name, active: c.active,
+        rate: own === null || own === undefined ? ratesOf[r.id]?.referral ?? 0 : r2(own),
+        rateOwn: !(own === null || own === undefined),
+        commission: r2(r.byChild[cid] || 0),
+        totalPhysicians: c.totalPhysicians, repOrders: c.repOrders, units: c.units, orderTotal: c.orderTotal,
+        earned: r2(c.earned), paid: r2(c.paid), pending: r2(c.pending),
+      };
+    });
+    r.commissionsEarned = r2(r.directCommission + r.referralCommission);
+    delete r.byChild;
+  }
 
   const totalsOut = {
     ...totals,

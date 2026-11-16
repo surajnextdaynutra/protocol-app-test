@@ -66,6 +66,7 @@ export const loader = async ({ request }) => {
           clinic: { $sum: "$commission.clinicAmt" },
           practice: { $sum: "$commission.practiceAmt" },
           rep: { $sum: "$commission.repAmt" },
+          referral: { $sum: "$commission.refAmt" },
           n: { $sum: 1 },
         },
       },
@@ -140,6 +141,7 @@ export default function Orders() {
           <Text as="span">Clinics: <b>{money(data.sums.clinic)}</b></Text>
           <Text as="span">Practices: <b>{money(data.sums.practice)}</b></Text>
           <Text as="span">Reps: <b>{money(data.sums.rep)}</b></Text>
+          <Text as="span">Referrals: <b>{money(data.sums.referral || 0)}</b></Text>
         </InlineStack>
         <Card>
           <Form method="get">
@@ -179,7 +181,10 @@ export default function Orders() {
               o.c.logged ? money(o.c.doctorAmt) : "-",
               o.c.logged ? money(o.c.clinicAmt) : "-",
               o.c.logged ? money(o.c.practiceAmt) : "-",
-              o.c.logged ? `${money(o.c.repAmt)}${o.c.repId ? ` (${o.c.repId})` : ""}` : "-",
+              o.c.logged
+                ? `${money(o.c.repAmt)}${o.c.repId ? ` (${o.c.repId})` : ""}` +
+                  (o.c.refRepId && o.c.refAmt ? ` + ${money(o.c.refAmt)} referral (${o.c.refRepId})` : "")
+                : "-",
               o.delivery,
               o.c.logged ? <StatusBadge key={o.id} status={o.c.status} /> : o.c.status === "Deleted" ? <StatusBadge key={o.id} status="Deleted" /> : "No commission",
               <InlineStack key={o.id + "a"} gap="200" wrap={false}>

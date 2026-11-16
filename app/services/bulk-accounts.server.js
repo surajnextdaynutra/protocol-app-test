@@ -15,6 +15,7 @@ import { ROLES, createPortalAccount } from "./provisioning.server";
    Columns (header names are flexible, case doesn't matter):
      Role, First Name, Last Name, Email          - required
      Sales Rep                                   - optional: RAP id, rep email or rep name
+                                                   (on a Sales Rep row: the rep who referred them)
      Clinic Location                             - optional: shown as the clinic name
      Parent Practice                             - Clinic (required) / Master Clinic (optional):
                                                    PRA… id or the email of a Practice
@@ -166,7 +167,8 @@ export async function previewBulkAccounts(text) {
   };
 
   for (const r of rows) {
-    if (r.role && r.role !== "Sales Rep" && r.role !== "Demo") {
+    if (r.role && r.role !== "Demo") {
+      // on a Sales Rep row the column is the rep who REFERRED them (optional)
       const rep = findRep(r.rep);
       if (rep.error) r.errors.push(rep.error);
       r.repResolved = rep;
@@ -255,6 +257,10 @@ export async function startBulkImport(text, { sendWelcome = true } = {}) {
       };
       const rp = r.repResolved || {};
       input.repId = rp.fromFile ? madeIds.get(rp.fromFile)?.repId || "" : rp.id || "";
+      if (r.role === "Sales Rep") {
+        input.referredBy = input.repId;
+        input.repId = "";
+      }
       const pp = r.parentResolved;
       if (pp?.kind === "practice") input.parentPracticeId = pp.fromFile ? madeIds.get(pp.fromFile)?.practiceId || "" : pp.id;
       if (pp?.kind === "clinic") input.parentClinicId = pp.fromFile ? madeIds.get(pp.fromFile)?.clinicId || "" : pp.id;

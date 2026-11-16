@@ -15,6 +15,7 @@
     "shopify": "shopify",
     "vite": "vite",
     "smoke": "vite-node -c tools/vite.smoke.config.js tools/smoke.mjs",
+    "smoke:referral": "vite-node -c tools/vite.smoke.config.js tools/smoke-referral.mjs",
     "theme:retarget": "node tools/retarget-theme.mjs",
     "local": "npm run build && node --env-file=.env ./node_modules/@remix-run/serve/dist/cli.js ./build/server/index.js"
   },

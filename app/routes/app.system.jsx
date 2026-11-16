@@ -70,7 +70,9 @@ export const action = async ({ request }) => {
         ? {
             ok: true,
             message: `Imported ${res.imported} of ${res.rows} row(s).` +
-              (res.notFound?.length ? ` Not found - check the name / Master Key: ${res.notFound.join(", ")}.` : ""),
+              (res.notFound?.length ? ` Not found - check the name / Master Key: ${res.notFound.join(", ")}.` : "") +
+              (res.noNameColumn ? " The file needs a Title (or Product Name) or Master Key column." : "") +
+              (res.ignored?.length ? ` Ignored (not product fields): ${res.ignored.join(", ")}.` : ""),
           }
         : { ok: false, message: res.error };
     }

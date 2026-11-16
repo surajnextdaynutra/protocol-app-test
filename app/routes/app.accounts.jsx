@@ -223,7 +223,7 @@ export const action = async ({ request }) => {
 
 const EMPTY_CREATE = {
   role: "Practice", firstName: "", lastName: "", email: "", clinicLocation: "",
-  repId: "", parentPracticeId: "", parentClinicId: "", sendWelcome: true,
+  repId: "", referredBy: "", parentPracticeId: "", parentClinicId: "", sendWelcome: true,
 };
 
 function CreateForm({ data, busy, onBulk, result }) {
@@ -272,6 +272,11 @@ function CreateForm({ data, busy, onBulk, result }) {
             {takesRep ? (
               <Select label="Sales representative (optional)" name="repId" value={v.repId} onChange={set("repId")}
                 options={[{ label: "None", value: "" }, ...data.repOptions]} />
+            ) : null}
+            {v.role === "Sales Rep" ? (
+              <Select label="Referred by (optional)" name="referredBy" value={v.referredBy} onChange={set("referredBy")}
+                options={[{ label: "None", value: "" }, ...data.repOptions]}
+                helpText="The rep who referred this one earns the referral commission on everything this rep sells." />
             ) : null}
             {!["Sales Rep", "Finance Admin", "Demo"].includes(v.role) ? (
               <TextField label="Clinic location (optional)" name="clinicLocation" value={v.clinicLocation} onChange={set("clinicLocation")}
@@ -450,7 +455,7 @@ function BulkModal({ open, onClose, data }) {
               Clinic Location, Parent Practice, Parent Clinic, Send Welcome</b> (optional). A Clinic needs a Parent Practice
               and a Physician a Parent Clinic - a PRA… / CLN… id, its tag (practice_id:PRA1 / clinic_id:CLN1), the email of
               that practice / clinic account (a Practice + Provider works for both), or the email of a row in the same file.
-              Sales Rep is a RAP id, rep email or rep name.
+              Sales Rep is a RAP id, rep email or rep name - on a Sales Rep row it is the rep who referred them (optional).
             </Text>
             <InlineStack gap="400" blockAlign="center">
               <input type="file" accept=".csv,text/csv" onChange={onFile} />
