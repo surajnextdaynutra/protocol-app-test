@@ -149,6 +149,7 @@ check("referrer shown", info.referrer?.name, "Rep A");
 check("bad code flagged", (await S.signupInfo({ ref: "ZZZZZZZZ" })).refInvalid, true);
 const form = {
   ref: team.referralCode, firstName: "Dana", lastName: "Lee", email: "dana@test.local", phone: "(555) 123-4567",
+  address: "1 Main St", city: "Austin", state: "TX", zip: "73301",
   agree: true, signatureName: "dana  lee", termsVersion: info.termsVersion,
 };
 const bad = await S.submitSignup({ ...form, signatureName: "Someone Else" }, null);
