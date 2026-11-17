@@ -9,6 +9,14 @@ import { invalidateResponses } from "./response-cache.server";
  * (Brevo keys, kill switches, commission rate, demo ids). Edited from
  * Shopify admin -> Rx Portal -> Settings; nothing here needs a redeploy.
  */
+export const REJECT_BODY_DEFAULT =
+  "<p>Hi [First Name],</p>" +
+  "<p>Thank you for your interest in becoming a sales representative with Protocol Therapeutics. " +
+  "After reviewing your application, we are unable to approve it at this time.</p>" +
+  "<p><b>Reason:</b> [Reason]</p>" +
+  "<p>If you have any questions, please contact us at [Contact Email].</p>" +
+  "<p>Protocol Therapeutics</p>";
+
 const LINK_NOTE =
   'HTML email body. Placeholders: [name] [link] [validity] [doctor_name]. [link] is used as the href of the "Click Here" button - the raw URL is never shown. [doctor_name] is the prescribing physician\'s name (already without a "Dr" prefix).';
 
@@ -75,8 +83,12 @@ export const SETTINGS_DEFAULTS = [
   ["REFERRAL_COMMISSION_PER_UNIT", "0.20", "Default referral commission in dollars per unit: what a rep earns on every unit sold by a rep they referred. Same rules as COMMISSION_PER_UNIT.", "commission"],
   // --- sales rep sign-up (referral link)
   ["REP_SIGNUP_ENABLED", "TRUE", "TRUE/FALSE - accept new sales rep sign-ups from referral links (page /pages/rep-signup).", "repsignup"],
-  ["REP_SIGNUP_TERMS", "", "The Terms & Conditions an applicant must agree to and sign in the sign-up popup. Plain text (line breaks are kept) or HTML - use Upload HTML file to load an .html file, then Save. Scripts in the HTML never run. Sign-up stays closed while this is empty. Each signed application keeps the exact text it was signed against.", "repsignup"],
+  ["REP_SIGNUP_TERMS", "", "The Terms & Conditions an applicant must read to the end and agree to in the sign-up popup. Plain text (line breaks are kept) or HTML - use Upload HTML file to load an .html file, then Save. Scripts in the HTML never run. Sign-up stays closed while this is empty. Each application keeps the exact text it was agreed against.", "repsignup"],
   ["REP_SIGNUP_NOTIFY_EMAIL", "", "Where new sales rep sign-ups are emailed for approval. Blank = SALES_EMAIL.", "repsignup"],
+  ["REP_SIGNUP_BREVO_SYNC", "TRUE", "TRUE/FALSE - save every sales rep sign-up (all form fields, referrer, submitted / terms-accepted / reviewed timestamps, status, reject reason, Rep ID) on the applicant's Brevo contact. Missing contact attributes are created in Brevo automatically.", "repsignup"],
+  ["REP_SIGNUP_BREVO_LIST", "", "Optional Brevo list (id, or exact list name) every sales rep applicant is added to. Blank = attributes only.", "repsignup"],
+  ["REP_SIGNUP_REJECT_SUBJECT", "Update on Your Protocol Therapeutics Sales Rep Application", "Subject of the email sent to an applicant when their sign-up is rejected with \"Email the applicant\" ticked. Placeholders: [First Name] [Last Name] [Name] [Reason].", "repsignup"],
+  ["REP_SIGNUP_REJECT_BODY", REJECT_BODY_DEFAULT, "Body of that email (HTML or plain text). Placeholders: [First Name] [Last Name] [Name] [Email] [Reason] [Contact Email] (= REP_SIGNUP_NOTIFY_EMAIL, else SALES_EMAIL).", "repsignup"],
   // --- product copies
   ["PRODUCT_SYNC_DELETE_ORPHANS", "FALSE", "TRUE = when a practice's last portal account is removed, delete that practice's product copies (after it has been missing on two sync runs). FALSE = only report them on the Products page.", "products"],
   ["LOCATION_ID", "", "Shopify inventory location id used for shared inventory. Blank = the store's primary location. Changing it re-stocks every copy at the new location from the master list.", "products"],

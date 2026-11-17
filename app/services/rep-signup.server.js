@@ -1,34 +1,109 @@
 import crypto from "node:crypto";
 import { connectDb } from "../db.server";
 import { Account, RepApplication, SalesRep } from "../models/index.server";
-import { sendEmail } from "./brevo.server";
+import { fillTemplate, sendEmail, syncRepApplicantToBrevo } from "./brevo.server";
 import { tagVal } from "./ids.server";
 import { kvGet, kvSet, logEvent } from "./log.server";
 import { createPortalAccount } from "./provisioning.server";
 import { repByReferralCode, setReferrer } from "./rep-rates.server";
 import { invalidateResponses } from "./response-cache.server";
-import { getSettings, isTrue } from "./settings.server";
+import { getSettings, isTrue, REJECT_BODY_DEFAULT } from "./settings.server";
 
 /* Sales rep sign-up through a referral link (/pages/rep-signup?ref=CODE).
 
    1. The page asks `info`: is sign-up open, who referred them, and the terms
       (Settings -> REP_SIGNUP_TERMS) with their version.
-   2. The applicant fills the form, then in the 4-step popup reads the terms,
-      ticks "I agree" and types their full legal name as the signature.
-      `submit` stores a Pending application with the exact terms text, the
-      signature, time, IP and browser.
+   2. The applicant fills the form, then in the 3-step popup reads the terms
+      to the end, ticks "I agree" and submits. `submit` stores a Pending
+      application with the exact terms text, the time, IP and browser; the
+      applicant's full name stands as their electronic acceptance.
       The terms may hold [[placeholders]] (see fillAgreement) - the copy the
-      applicant signed is stored filled in (signedHtml) and returned to the
+      applicant agreed to is stored filled in (signedHtml) and returned to the
       page, which offers it as a PDF download.
+      The application is also saved to the applicant's Brevo contact
+      (syncRepApplicantToBrevo) and kept in step on approve / reject.
    3. An admin approves (Shopify admin -> Sales reps, or the Finance
       dashboard): that creates the Shopify login + SalesRep on the default
-      rates, referred by the link's rep. Reject keeps the record. */
+      rates, referred by the link's rep. Reject keeps the record and can
+      email the applicant the reason (REP_SIGNUP_REJECT_SUBJECT / _BODY). */
 
 const termsVersion = (text) => crypto.createHash("sha256").update(String(text || "")).digest("hex").slice(0, 12);
-const norm = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
+
+/* ------------------------------- validation -------------------------------
+   Same rules as the sign-up page (rx-rep-signup.liquid) - keep in step. */
 const NAME_RE = /^[A-Za-z][A-Za-z .'-]{0,49}$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const CITY_RE = /^[A-Za-z][A-Za-z .'-]{1,59}$/;
+const EMAIL_RE = /^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
 const ZIP_RE = /^\d{5}(-\d{4})?$/;
+const COMPANY_RE = /^[A-Za-z0-9][A-Za-z0-9 &.,'()/#+-]{0,99}$/;
+const ADDRESS_RE = /^[A-Za-z0-9#][A-Za-z0-9 #.,'/-]{3,119}$/;
+
+export const US_STATES = {
+  AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California", CO: "Colorado", CT: "Connecticut",
+  DE: "Delaware", DC: "District of Columbia", FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois",
+  IN: "Indiana", IA: "Iowa", KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland",
+  MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri", MT: "Montana",
+  NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico", NY: "New York",
+  NC: "North Carolina", ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania",
+  RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah",
+  VT: "Vermont", VA: "Virginia", WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming",
+};
+/** "tx" / "Texas" -> "TX"; anything else -> "". */
+function stateCode(s) {
+  const t = String(s || "").trim();
+  if (US_STATES[t.toUpperCase()]) return t.toUpperCase();
+  const hit = Object.entries(US_STATES).find(([, name]) => name.toLowerCase() === t.toLowerCase());
+  return hit ? hit[0] : "";
+}
+/** US phone -> "555-234-5678", or "" when it is not a valid 10-digit number
+ *  (area code and exchange may not start with 0 or 1). */
+function usPhone(s) {
+  const raw = String(s || "").trim();
+  if (!/^[0-9 ()+.-]+$/.test(raw)) return "";
+  let d = raw.replace(/\D/g, "");
+  if (d.length === 11 && d[0] === "1") d = d.slice(1);
+  if (!/^[2-9]\d{2}[2-9]\d{6}$/.test(d)) return "";
+  return `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}`;
+}
+
+/** Cleans + checks the sign-up form. Returns { v, fields } (fields = errors). */
+export function validateSignupFields(p) {
+  const clean = (x, max) => String(x || "").trim().replace(/\s+/g, " ").slice(0, max);
+  const v = {
+    firstName: clean(p.firstName, 60),
+    lastName: clean(p.lastName, 60),
+    email: String(p.email || "").trim().toLowerCase(),
+    phone: String(p.phone || "").trim(),
+    company: clean(p.company, 120),
+    address: clean(p.address, 140),
+    city: clean(p.city, 80),
+    state: String(p.state || "").trim(),
+    zip: String(p.zip || "").trim(),
+  };
+  const fields = {};
+  if (!v.firstName) fields.firstName = "Enter your first name.";
+  else if (!NAME_RE.test(v.firstName)) fields.firstName = "Use letters only (spaces, - . ' allowed), up to 50 characters.";
+  if (!v.lastName) fields.lastName = "Enter your last name.";
+  else if (!NAME_RE.test(v.lastName)) fields.lastName = "Use letters only (spaces, - . ' allowed), up to 50 characters.";
+  if (!v.email) fields.email = "Enter your email address.";
+  else if (!EMAIL_RE.test(v.email) || v.email.length > 120 || v.email.includes("..")) fields.email = "Enter a valid email address.";
+  const phone = usPhone(v.phone);
+  if (!v.phone) fields.phone = "Enter your phone number.";
+  else if (!phone) fields.phone = "Enter a valid 10-digit US phone number (XXX-XXX-XXXX).";
+  else v.phone = phone;
+  if (v.company && !COMPANY_RE.test(v.company)) fields.company = "Use letters, numbers and & . , ' ( ) / # + - only, up to 100 characters.";
+  if (!v.address) fields.address = "Enter your street address.";
+  else if (!ADDRESS_RE.test(v.address) || !/[A-Za-z]/.test(v.address)) fields.address = "Enter a valid street address (4-120 characters, letters, numbers and # . , ' / - only).";
+  if (!v.city) fields.city = "Enter your city.";
+  else if (!CITY_RE.test(v.city)) fields.city = "Use letters only (spaces, - . ' allowed).";
+  const st = stateCode(v.state);
+  if (!v.state) fields.state = "Select your state.";
+  else if (!st) fields.state = "Select a US state from the list.";
+  else v.state = st;
+  if (!v.zip) fields.zip = "Enter your ZIP code.";
+  else if (!ZIP_RE.test(v.zip)) fields.zip = "Enter a 5-digit ZIP code (or ZIP+4: XXXXX-XXXX).";
+  return { v, fields };
+}
 
 /* ------------------------- agreement placeholders -------------------------
    REP_SIGNUP_TERMS can contain these; the sign-up popup previews them filled
@@ -38,7 +113,7 @@ const ZIP_RE = /^\d{5}(-\d{4})?$/;
      [[agent_name]]    business name, or the full name when there is none
      [[full_name]] [[first_name]] [[last_name]] [[business_name]]
      [[email]] [[phone]] [[address]]
-     [[signature]]     the typed signature + "Electronically signed ..." line */
+     [[signature]]     the applicant's full name + "Accepted electronically ..." line */
 const escHtml = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const TZ = "America/Chicago";
 const fmtDate = (d) => d.toLocaleDateString("en-US", { timeZone: TZ, year: "numeric", month: "long", day: "numeric" });
@@ -52,7 +127,7 @@ export function signatureHtml(name, when) {
   return (
     '<span style="display:inline-block;line-height:1.15">' +
     `<span class="pt-signature" style="font-family:'Dancing Script','Segoe Script','Brush Script MT',cursive;font-size:30px;font-weight:600;color:#143056">${escHtml(name)}</span>` +
-    `<span style="display:block;font:11px/1.4 Arial,Helvetica,sans-serif;color:#4A5562">Electronically signed ${escHtml(fmtDateTime(when))}</span>` +
+    `<span style="display:block;font:11px/1.4 Arial,Helvetica,sans-serif;color:#4A5562">Accepted electronically ${escHtml(fmtDateTime(when))}</span>` +
     "</span>"
   );
 }
@@ -114,36 +189,11 @@ export async function submitSignup(p, request) {
   const { cfg, terms, version, open } = await signupConfig();
   if (!open) return { ok: false, error: "Sales rep sign-up is not open right now." };
 
-  const v = {
-    firstName: String(p.firstName || "").trim(),
-    lastName: String(p.lastName || "").trim(),
-    email: String(p.email || "").trim().toLowerCase(),
-    phone: String(p.phone || "").trim(),
-    company: String(p.company || "").trim().slice(0, 100),
-    address: String(p.address || "").trim().replace(/\s+/g, " ").slice(0, 120),
-    city: String(p.city || "").trim().replace(/\s+/g, " ").slice(0, 60),
-    state: String(p.state || "").trim().slice(0, 50),
-    zip: String(p.zip || "").trim(),
-    signatureName: String(p.signatureName || "").trim().replace(/\s+/g, " "),
-  };
-  const fields = {};
-  if (!NAME_RE.test(v.firstName)) fields.firstName = "Enter your first name (letters only).";
-  if (!NAME_RE.test(v.lastName)) fields.lastName = "Enter your last name (letters only).";
-  if (!EMAIL_RE.test(v.email) || v.email.length > 120) fields.email = "Enter a valid email address.";
-  const digits = v.phone.replace(/\D/g, "");
-  if (!(digits.length === 10 || (digits.length === 11 && digits[0] === "1")) || !/^[0-9 ()+.-]+$/.test(v.phone)) {
-    fields.phone = "Enter a valid 10-digit phone number.";
-  }
-  if (v.address.length < 3) fields.address = "Enter your street address.";
-  if (!v.city) fields.city = "Enter your city.";
-  if (!v.state) fields.state = "Enter your state.";
-  if (!ZIP_RE.test(v.zip)) fields.zip = "Enter a 5-digit ZIP code.";
+  const { v, fields } = validateSignupFields(p);
+  // no typed signature any more: agreeing + submitting under their own name is the acceptance
+  v.signatureName = `${v.firstName} ${v.lastName}`.trim();
   const agreed = p.agree === true || String(p.agree) === "true";
   if (!agreed) fields.agree = "You must agree to the Terms & Conditions to sign up.";
-  if (!v.signatureName) fields.signatureName = "Type your full legal name to sign.";
-  else if (norm(v.signatureName) !== norm(`${v.firstName} ${v.lastName}`)) {
-    fields.signatureName = "Your signature must match your first and last name exactly.";
-  }
   if (Object.keys(fields).length) return { ok: false, fields, error: "Please fix the highlighted fields." };
   if (String(p.termsVersion || "") !== version) {
     return { ok: false, termsChanged: true, error: "The Terms & Conditions were updated while you were signing. Please read them again and re-sign." };
@@ -183,6 +233,9 @@ export async function submitSignup(p, request) {
   invalidateResponses();
   logEvent("sync", v.email, `sales rep sign-up received${referrer ? ` (referred by ${referrer.repId})` : ""}`, { applicationId: String(app._id) });
 
+  // the whole application on the applicant's Brevo contact - best effort
+  pushToBrevo(app.toObject(), { referrerName: referrer?.name || "" });
+
   // tell the team - best effort, the application is already saved
   const to = String(cfg.REP_SIGNUP_NOTIFY_EMAIL || cfg.SALES_EMAIL || "").trim();
   if (to) {
@@ -194,7 +247,7 @@ export async function submitSignup(p, request) {
       ["Business", v.company || "-"],
       ["Address", fullAddress(v) || "-"],
       ["Referred by", referrer ? `${referrer.name || referrer.repId} (${referrer.repId})` : "No referral link"],
-      ["Signed", `${v.signatureName}, ${fmtDateTime(signedAt)}`],
+      ["Agreed to terms", fmtDateTime(signedAt)],
     ];
     sendEmail({
       to,
@@ -244,8 +297,34 @@ export async function listApplications({ status = "", limit = 200 } = {}) {
     reviewedBy: r.reviewedBy,
     reviewedAt: r.reviewedAt ? r.reviewedAt.getTime() : 0,
     reviewNote: r.reviewNote,
+    rejectEmailSentAt: r.rejectEmailSentAt ? r.rejectEmailSentAt.getTime() : 0,
+    rejectEmailError: r.rejectEmailError || "",
+    brevoSyncedAt: r.brevoSyncedAt ? r.brevoSyncedAt.getTime() : 0,
+    brevoError: r.brevoError || "",
     ts: r.createdAt ? r.createdAt.getTime() : 0,
   }));
+}
+
+/* --------------------------------- Brevo -------------------------------- */
+
+/** Saves the application to Brevo and records the outcome on it. Never throws. */
+async function pushToBrevo(app, { referrerName } = {}) {
+  try {
+    let name = referrerName;
+    if (name === undefined && app.referrerRepId) {
+      name = (await SalesRep.findOne({ repId: app.referrerRepId }, { name: 1 }).lean())?.name || app.referrerRepId;
+    }
+    const res = await syncRepApplicantToBrevo(app, { referrerName: name || "" });
+    if (res.skipped) return res;
+    await RepApplication.updateOne(
+      { _id: app._id },
+      res.ok ? { $set: { brevoSyncedAt: new Date(), brevoError: "" } } : { $set: { brevoError: String(res.error || "failed").slice(0, 300) } },
+    );
+    return res;
+  } catch (err) {
+    logEvent("error", app.email, "rep sign-up -> Brevo: " + String(err?.message || err).slice(0, 300), null, false);
+    return { ok: false, error: String(err?.message || err) };
+  }
 }
 
 /** The agreement an application signed: the filled-in, signed copy when
@@ -295,17 +374,58 @@ export async function approveApplication(id, { by = "", sendWelcome = true } = {
   );
   invalidateResponses();
   logEvent("sync", app.email, `sales rep sign-up approved -> ${repId} by ${by || "?"}`);
+  pushToBrevo(await RepApplication.findById(app._id).lean());
   return { ok: true, repId, message: `Approved - ${app.firstName} ${app.lastName} is now ${repId}.${referrerNote}` };
 }
 
-export async function rejectApplication(id, { by = "", note = "" } = {}) {
+const REJECT_SUBJECT_DEFAULT = "Update on Your Protocol Therapeutics Sales Rep Application";
+
+/**
+ * Reject: keeps the record. With `notify`, emails the applicant the reason
+ * (Settings -> REP_SIGNUP_REJECT_SUBJECT / REP_SIGNUP_REJECT_BODY); the
+ * reason is then required. A failed email never undoes the rejection - the
+ * message says so and the failure is kept on the application.
+ */
+export async function rejectApplication(id, { by = "", note = "", notify = false } = {}) {
   await connectDb();
+  const reason = String(note || "").trim().slice(0, 500);
+  if (notify && !reason) return { ok: false, error: "Enter the reason - it is emailed to the applicant." };
   const res = await RepApplication.updateOne(
     { _id: id, status: "Pending" },
-    { $set: { status: "Rejected", reviewedBy: String(by), reviewedAt: new Date(), reviewNote: String(note || "").slice(0, 500) } },
+    { $set: { status: "Rejected", reviewedBy: String(by), reviewedAt: new Date(), reviewNote: reason } },
   );
   if (!res.modifiedCount) return { ok: false, error: "Only a pending sign-up can be rejected." };
   invalidateResponses();
   logEvent("sync", String(id), `sales rep sign-up rejected by ${by || "?"}`);
-  return { ok: true, message: "Sign-up rejected." };
+  const app = await RepApplication.findById(id).lean();
+  pushToBrevo(app);
+
+  if (!notify) return { ok: true, message: "Sign-up rejected (no email sent)." };
+  try {
+    await sendRejectEmail(app, reason);
+    await RepApplication.updateOne({ _id: app._id }, { $set: { rejectEmailSentAt: new Date(), rejectEmailError: "" } });
+    return { ok: true, message: `Sign-up rejected - ${app.email} was emailed the reason.` };
+  } catch (err) {
+    const why = String(err?.message || err).slice(0, 300);
+    await RepApplication.updateOne({ _id: app._id }, { $set: { rejectEmailError: why } });
+    return { ok: true, warning: true, message: `Sign-up rejected, but the email to ${app.email} could not be sent: ${why}` };
+  }
+}
+
+/** The rejection email. A paragraph / line holding [Reason] is dropped when there is no reason. */
+async function sendRejectEmail(app, reason) {
+  const cfg = await getSettings();
+  const values = {
+    "First Name": app.firstName || "",
+    "Last Name": app.lastName || "",
+    Name: `${app.firstName || ""} ${app.lastName || ""}`.trim(),
+    Email: app.email || "",
+    Reason: escHtml(reason).replace(/\r?\n/g, "<br>"),
+    "Contact Email": String(cfg.REP_SIGNUP_NOTIFY_EMAIL || cfg.SALES_EMAIL || "").trim(),
+  };
+  let body = String(cfg.REP_SIGNUP_REJECT_BODY || "").trim() || REJECT_BODY_DEFAULT;
+  if (!reason) body = body.replace(/<p[^>]*>(?:(?!<\/p>)[\s\S])*\[Reason\][\s\S]*?<\/p>/gi, "").replace(/^.*\[Reason\].*$\n?/gm, "");
+  if (!/<[a-z][\s\S]*>/i.test(body)) body = body.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
+  const subject = fillTemplate(String(cfg.REP_SIGNUP_REJECT_SUBJECT || "").trim() || REJECT_SUBJECT_DEFAULT, { ...values, Reason: reason });
+  await sendEmail({ to: app.email, subject, htmlBody: fillTemplate(body, values) });
 }

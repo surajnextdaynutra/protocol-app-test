@@ -395,7 +395,11 @@ const repApplicationSchema = new Schema(
     customerId: { type: String, default: "" },
     reviewedBy: { type: String, default: "" },
     reviewedAt: { type: Date, default: null },
-    reviewNote: { type: String, default: "" },
+    reviewNote: { type: String, default: "" }, // reject reason (emailed when chosen)
+    rejectEmailSentAt: { type: Date, default: null },
+    rejectEmailError: { type: String, default: "" },
+    brevoSyncedAt: { type: Date, default: null }, // last time the application reached Brevo
+    brevoError: { type: String, default: "" },
   },
   { timestamps: true },
 );

@@ -467,7 +467,11 @@ const finance = {
   },
   rejectSignup: async ({ p, caller }) => {
     requireFinance(caller);
-    return rejectApplication(String(p.id || ""), { by: await financeActor(caller), note: p.note });
+    return rejectApplication(String(p.id || ""), {
+      by: await financeActor(caller),
+      note: p.note,
+      notify: p.notify === true || String(p.notify) === "true",
+    });
   },
 };
 

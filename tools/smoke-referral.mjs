@@ -148,21 +148,51 @@ check("open with terms", info.open, true);
 check("referrer shown", info.referrer?.name, "Rep A");
 check("bad code flagged", (await S.signupInfo({ ref: "ZZZZZZZZ" })).refInvalid, true);
 const form = {
-  ref: team.referralCode, firstName: "Dana", lastName: "Lee", email: "dana@test.local", phone: "(555) 123-4567",
-  address: "1 Main St", city: "Austin", state: "TX", zip: "73301",
-  agree: true, signatureName: "dana  lee", termsVersion: info.termsVersion,
+  ref: team.referralCode, firstName: "Dana", lastName: "Lee", email: "dana@test.local", phone: "(555) 234-5678",
+  address: "1 Main St", city: "Austin", state: "Texas", zip: "73301",
+  agree: true, termsVersion: info.termsVersion,
 };
-const bad = await S.submitSignup({ ...form, signatureName: "Someone Else" }, null);
-check("signature must match name", !!bad.fields?.signatureName, true);
+// field validation (same rules as the sign-up page)
+const fieldErr = async (patch, key) => !!(await S.submitSignup({ ...form, ...patch }, null)).fields?.[key];
+check("first name: digits refused", await fieldErr({ firstName: "Dana2" }, "firstName"), true);
+check("last name: required", await fieldErr({ lastName: " " }, "lastName"), true);
+check("email: bad format refused", await fieldErr({ email: "dana@test" }, "email"), true);
+check("email: double dot refused", await fieldErr({ email: "dana..lee@test.local" }, "email"), true);
+check("phone: 9 digits refused", await fieldErr({ phone: "555-234-567" }, "phone"), true);
+check("phone: exchange starting 1 refused", await fieldErr({ phone: "555-123-4567" }, "phone"), true);
+check("phone: letters refused", await fieldErr({ phone: "555-234-56ab" }, "phone"), true);
+const okField = (patch, key) => !S.validateSignupFields({ ...form, ...patch }).fields[key]; // never submits
+check("company: optional", okField({ company: "" }, "company"), true);
+check("company: & and . allowed", okField({ company: "Lee & Sons, Inc." }, "company"), true);
+check("company: < > refused", await fieldErr({ company: "<b>Acme</b>" }, "company"), true);
+check("address: needs a letter", await fieldErr({ address: "1234" }, "address"), true);
+check("city: digits refused", await fieldErr({ city: "Austin 2" }, "city"), true);
+check("state: unknown refused", await fieldErr({ state: "Texass" }, "state"), true);
+check("zip: 4 digits refused", await fieldErr({ zip: "7330" }, "zip"), true);
+check("zip: ZIP+4 allowed", okField({ zip: "73301-1234" }, "zip"), true);
+check("phone: +1 and spaces allowed", okField({ phone: "+1 555 234 5678" }, "phone"), true);
+check("whole form valid, no typed signature needed", Object.keys(S.validateSignupFields(form).fields).length, 0);
 check("must agree", !!(await S.submitSignup({ ...form, agree: false }, null)).fields?.agree, true);
 check("stale terms refused", (await S.submitSignup({ ...form, termsVersion: "old" }, null)).termsChanged, true);
 check("valid sign-up", (await S.submitSignup(form, null)).ok, true);
 check("duplicate pending refused", (await S.submitSignup(form, null)).ok, false);
 const apps = await S.listApplications({ status: "Pending" });
 check("pending with referrer", apps[0]?.referrerRepId, "RAP1");
+check("phone stored normalised", apps[0]?.phone, "555-234-5678");
+check("state stored as code", apps[0]?.state, "TX");
+check("full name stands as the acceptance", apps[0]?.signatureName, "Dana Lee");
 const terms = await S.applicationTerms(apps[0].id);
 check("signed terms kept word for word", terms.terms, "Agreement text for this test.");
-check("reject", (await S.rejectApplication(apps[0].id, { by: "test", note: "n" })).ok, true);
+check("reject + email needs a reason", (await S.rejectApplication(apps[0].id, { by: "test", note: " ", notify: true })).ok, false);
+check("still pending after refused reject", (await S.listApplications({ status: "Pending" })).length, 1);
+// no network here: the rejection stands, the failed email is reported and kept
+const rej = await S.rejectApplication(apps[0].id, { by: "test", note: "Territory already covered", notify: true });
+check("reject with email", rej.ok, true);
+check("failed email reported", !!rej.warning, true);
+const rejected = (await S.listApplications({ status: "Rejected" }))[0];
+check("reject reason kept", rejected?.reviewNote, "Territory already covered");
+check("email failure kept", !!rejected?.rejectEmailError, true);
+check("only pending can be rejected", (await S.rejectApplication(apps[0].id, { by: "test" })).ok, false);
 
 /* ---- per-referral rate, per-practice rate, Sales Reps History / Edit ---- */
 const later = () => new Date(Date.now() + 1000);

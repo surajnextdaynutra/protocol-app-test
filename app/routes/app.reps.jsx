@@ -126,8 +126,8 @@ export const action = async ({ request }) => {
     return { ok: res.ok, message: res.ok ? res.message : res.error };
   }
   if (intent === "reject") {
-    const res = await rejectApplication(String(f.get("id") || ""), { by: BY, note: f.get("note") });
-    return { ok: res.ok, message: res.ok ? res.message : res.error };
+    const res = await rejectApplication(String(f.get("id") || ""), { by: BY, note: f.get("note"), notify: f.get("notify") === "true" });
+    return { ok: res.ok && !res.warning, message: res.ok ? res.message : res.error };
   }
   if (intent === "code") {
     const code = await ensureReferralCode(String(f.get("repId") || ""));
@@ -210,6 +210,7 @@ function DefaultsCard({ defaults, reps, busy }) {
 function SignupsCard({ pending, recent, signupOpen, busy }) {
   const [openTerms, setOpenTerms] = useState("");
   const [notes, setNotes] = useState({});
+  const [mailOff, setMailOff] = useState({}); // id -> true when "Email the applicant" is unticked
   const approving = useBusy("approve");
   const rejecting = useBusy("reject");
   return (
@@ -237,9 +238,10 @@ function SignupsCard({ pending, recent, signupOpen, busy }) {
                 {a.email} · {a.phone}{a.company ? ` · ${a.company}` : ""}{a.address ? ` · ${a.address}` : a.state ? ` · ${a.state}` : ""}
               </Text>
               <Text as="p">Referred by: <b>{a.referrerRepId ? `${a.referrerName} (${a.referrerRepId})` : "no referral link"}</b></Text>
-              {a.signatureName ? (
+              {a.signedAt ? (
                 <Text as="p" tone="subdued" variant="bodySm">
-                  Signed “{a.signatureName}” on {dateTime(a.signedAt)} UTC · terms version {a.termsVersion}{a.ip ? ` · IP ${a.ip}` : ""}
+                  Agreed to the terms on {dateTime(a.signedAt)} UTC · terms version {a.termsVersion}{a.ip ? ` · IP ${a.ip}` : ""}
+                  {a.brevoSyncedAt ? " · saved to Brevo" : a.brevoError ? ` · Brevo: ${a.brevoError}` : ""}
                 </Text>
               ) : a.ip ? (
                 <Text as="p" tone="subdued" variant="bodySm">IP {a.ip}</Text>
@@ -263,10 +265,21 @@ function SignupsCard({ pending, recent, signupOpen, busy }) {
                 <Form method="post">
                   <input type="hidden" name="intent" value="reject" />
                   <input type="hidden" name="id" value={a.id} />
+                  <input type="hidden" name="notify" value={mailOff[a.id] ? "false" : "true"} />
                   <InlineStack gap="200" blockAlign="end">
-                    <TextField label="Reason (optional)" labelHidden placeholder="Reason (optional)" name="note"
-                      value={notes[a.id] || ""} onChange={(v) => setNotes((s) => ({ ...s, [a.id]: v }))} autoComplete="off" />
-                    <Button submit tone="critical" loading={rejecting} disabled={busy && !rejecting}>Reject</Button>
+                    <TextField
+                      label={mailOff[a.id] ? "Reason (optional)" : "Reason (emailed to the applicant)"}
+                      labelHidden
+                      placeholder={mailOff[a.id] ? "Reason (optional)" : "Reason - emailed to the applicant"}
+                      name="note"
+                      value={notes[a.id] || ""}
+                      onChange={(v) => setNotes((s) => ({ ...s, [a.id]: v }))}
+                      autoComplete="off"
+                    />
+                    <Checkbox label="Email the applicant" checked={!mailOff[a.id]}
+                      onChange={(on) => setMailOff((s) => ({ ...s, [a.id]: !on }))} />
+                    <Button submit tone="critical" loading={rejecting}
+                      disabled={(busy && !rejecting) || (!mailOff[a.id] && !String(notes[a.id] || "").trim())}>Reject</Button>
                   </InlineStack>
                 </Form>
               </InlineStack>
@@ -281,7 +294,10 @@ function SignupsCard({ pending, recent, signupOpen, busy }) {
               dateTime(a.reviewedAt || a.ts),
               a.name,
               a.referrerName || "-",
-              a.status + (a.reviewNote ? ` (${a.reviewNote})` : ""),
+              a.status + (a.reviewNote ? ` (${a.reviewNote})` : "") +
+                (a.status === "Rejected"
+                  ? a.rejectEmailSentAt ? " · emailed" : a.rejectEmailError ? ` · email failed: ${a.rejectEmailError}` : ""
+                  : ""),
               a.repId || "-",
             ])}
           />
