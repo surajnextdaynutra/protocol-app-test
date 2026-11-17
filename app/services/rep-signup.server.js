@@ -3,11 +3,19 @@ import { connectDb } from "../db.server";
 import { Account, RepApplication, SalesRep } from "../models/index.server";
 import { fillTemplate, sendEmail, syncRepApplicantToBrevo } from "./brevo.server";
 import { tagVal } from "./ids.server";
-import { kvGet, kvSet, logEvent } from "./log.server";
-import { createPortalAccount } from "./provisioning.server";
+import { kvSet, logEvent } from "./log.server";
+import { createPortalAccount, retryWelcomeEmail } from "./provisioning.server";
+import { welcomeLinkForRole } from "../components/welcome-link";
 import { repByReferralCode, setReferrer } from "./rep-rates.server";
 import { invalidateResponses } from "./response-cache.server";
-import { getSettings, isTrue, REJECT_BODY_DEFAULT } from "./settings.server";
+import {
+  APPROVED_BODY_DEFAULT,
+  getSettings,
+  isTrue,
+  REFERRER_APPROVED_BODY_DEFAULT,
+  REFERRER_REJECT_BODY_DEFAULT,
+  REJECT_BODY_DEFAULT,
+} from "./settings.server";
 
 /* Sales rep sign-up through a referral link (/pages/rep-signup?ref=CODE).
 
@@ -37,6 +45,7 @@ const EMAIL_RE = /^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{
 const ZIP_RE = /^\d{5}(-\d{4})?$/;
 const COMPANY_RE = /^[A-Za-z0-9][A-Za-z0-9 &.,'()/#+-]{0,99}$/;
 const ADDRESS_RE = /^[A-Za-z0-9#][A-Za-z0-9 #.,'/-]{3,119}$/;
+export const WHY_MAX = 500; // "Why I want to be a Sales Agent for Protocol Therapeutics"
 
 export const US_STATES = {
   AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California", CO: "Colorado", CT: "Connecticut",
@@ -79,6 +88,14 @@ export function validateSignupFields(p) {
     city: clean(p.city, 80),
     state: String(p.state || "").trim(),
     zip: String(p.zip || "").trim(),
+    // the long answer keeps its line breaks (control characters dropped)
+    whyJoin: String(p.whyJoin || "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/[^\S\n]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      // eslint-disable-next-line no-control-regex -- stripping control characters is the point
+      .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "")
+      .trim(),
   };
   const fields = {};
   if (!v.firstName) fields.firstName = "Enter your first name.";
@@ -92,16 +109,20 @@ export function validateSignupFields(p) {
   else if (!phone) fields.phone = "Enter a valid 10-digit US phone number (XXX-XXX-XXXX).";
   else v.phone = phone;
   if (v.company && !COMPANY_RE.test(v.company)) fields.company = "Use letters, numbers and & . , ' ( ) / # + - only, up to 100 characters.";
-  if (!v.address) fields.address = "Enter your street address.";
-  else if (!ADDRESS_RE.test(v.address) || !/[A-Za-z]/.test(v.address)) fields.address = "Enter a valid street address (4-120 characters, letters, numbers and # . , ' / - only).";
-  if (!v.city) fields.city = "Enter your city.";
-  else if (!CITY_RE.test(v.city)) fields.city = "Use letters only (spaces, - . ' allowed).";
-  const st = stateCode(v.state);
-  if (!v.state) fields.state = "Select your state.";
-  else if (!st) fields.state = "Select a US state from the list.";
-  else v.state = st;
-  if (!v.zip) fields.zip = "Enter your ZIP code.";
-  else if (!ZIP_RE.test(v.zip)) fields.zip = "Enter a 5-digit ZIP code (or ZIP+4: XXXXX-XXXX).";
+  if (!v.whyJoin) fields.whyJoin = "Please tell us why you want to be a Sales Agent.";
+  else if (v.whyJoin.length > WHY_MAX) fields.whyJoin = `Please keep this to ${WHY_MAX} characters or fewer.`;
+  // The sign-up page no longer asks for an address (it comes with the banking
+  // details later) - these stay optional, and are only checked when sent.
+  if (v.address && (!ADDRESS_RE.test(v.address) || !/[A-Za-z]/.test(v.address))) {
+    fields.address = "Enter a valid street address (4-120 characters, letters, numbers and # . , ' / - only).";
+  }
+  if (v.city && !CITY_RE.test(v.city)) fields.city = "Use letters only (spaces, - . ' allowed).";
+  if (v.state) {
+    const st = stateCode(v.state);
+    if (!st) fields.state = "Select a US state from the list.";
+    else v.state = st;
+  }
+  if (v.zip && !ZIP_RE.test(v.zip)) fields.zip = "Enter a 5-digit ZIP code (or ZIP+4: XXXXX-XXXX).";
   return { v, fields };
 }
 
@@ -110,7 +131,7 @@ export function validateSignupFields(p) {
    in and the signed copy is stored filled in. Keep in step with fillAgreement
    in rx-rep-signup.liquid (the popup preview).
      [[date]]          execution date (the day signed, US Central time)
-     [[agent_name]]    business name, or the full name when there is none
+     [[agent_name]]    the applicant's first + last name (never the business name)
      [[full_name]] [[first_name]] [[last_name]] [[business_name]]
      [[email]] [[phone]] [[address]]
      [[signature]]     the applicant's full name + "Accepted electronically ..." line */
@@ -136,7 +157,7 @@ export function fillAgreement(terms, v, signedAt) {
   const full = `${v.firstName || ""} ${v.lastName || ""}`.trim();
   const map = {
     date: fmtDate(signedAt),
-    agent_name: v.company || full,
+    agent_name: full, // always the person's name, never the business name (client, 2026-11-18)
     full_name: full,
     first_name: v.firstName,
     last_name: v.lastName,
@@ -178,11 +199,28 @@ export async function signupInfo({ ref = "" }) {
   };
 }
 
+/* The visitor's address. Sign-ups come in through Shopify's app proxy (and,
+   in development, a Cloudflare tunnel), so cf-connecting-ip is the address of
+   SHOPIFY's server, the same for every visitor - reading it first made every
+   sign-up share one rate limit (2026-11-18). The first entry of
+   X-Forwarded-For is the original client when a proxy passes it on; the raw
+   headers are kept with each application so this can be checked. */
 function clientInfo(request) {
   const h = request?.headers;
-  const ip = String(h?.get("cf-connecting-ip") || h?.get("x-forwarded-for") || h?.get("x-real-ip") || "").slice(0, 200);
-  return { ip, userAgent: String(h?.get("user-agent") || "").slice(0, 300) };
+  const get = (k) => String(h?.get(k) || "").trim();
+  const xff = get("x-forwarded-for");
+  const ip = (xff.split(",")[0].trim() || get("x-real-ip") || get("cf-connecting-ip")).slice(0, 200);
+  return {
+    ip,
+    ipHeaders: { xForwardedFor: xff.slice(0, 300), xRealIp: get("x-real-ip").slice(0, 100), cfConnectingIp: get("cf-connecting-ip").slice(0, 100) },
+    userAgent: get("user-agent").slice(0, 300),
+  };
 }
+
+/* No per-address sign-up limit (removed 2026-11-18 at the client's request):
+   behind Shopify's app proxy every visitor can arrive from the same address,
+   so a limit blocked real applicants. Duplicates are still refused per email,
+   and every application waits for approval. */
 
 /** Validates and stores one signed application. Public. */
 export async function submitSignup(p, request) {
@@ -200,12 +238,7 @@ export async function submitSignup(p, request) {
   }
 
   await connectDb();
-  const { ip, userAgent } = clientInfo(request);
-  // at most 5 sign-ups an hour from one connection
-  const rlKey = "repsignup:" + (ip || "unknown");
-  const count = Number((await kvGet(rlKey)) || 0);
-  if (count >= 5) return { ok: false, error: "Too many sign-ups from this connection. Please try again later." };
-  await kvSet(rlKey, count + 1, 3600);
+  const { ip, ipHeaders, userAgent } = clientInfo(request);
 
   if (await Account.exists({ email: v.email })) {
     return { ok: false, fields: { email: "An account with this email already exists. Please log in instead." }, error: "This email is already registered." };
@@ -228,6 +261,7 @@ export async function submitSignup(p, request) {
     termsText: terms,
     signedHtml,
     ip,
+    ipHeaders,
     userAgent,
   });
   invalidateResponses();
@@ -245,7 +279,7 @@ export async function submitSignup(p, request) {
       ["Email", v.email],
       ["Phone", v.phone],
       ["Business", v.company || "-"],
-      ["Address", fullAddress(v) || "-"],
+      ["Why they want to be a Sales Agent", v.whyJoin],
       ["Referred by", referrer ? `${referrer.name || referrer.repId} (${referrer.repId})` : "No referral link"],
       ["Agreed to terms", fmtDateTime(signedAt)],
     ];
@@ -254,7 +288,9 @@ export async function submitSignup(p, request) {
       subject: `New sales rep sign-up: ${v.firstName} ${v.lastName}`,
       htmlBody:
         "<p>A new sales rep has signed up and is waiting for approval (Shopify admin &rarr; Rx Portal &rarr; Sales reps).</p>" +
-        "<table>" + rows.map(([k, val]) => `<tr><td><b>${esc(k)}</b></td><td>${esc(val)}</td></tr>`).join("") + "</table>",
+        "<table>" +
+        rows.map(([k, val]) => `<tr><td valign="top"><b>${esc(k)}</b></td><td>${esc(val).replace(/\n/g, "<br>")}</td></tr>`).join("") +
+        "</table>",
     }).catch(() => {});
   }
   return {
@@ -287,6 +323,7 @@ export async function listApplications({ status = "", limit = 200 } = {}) {
     company: r.company,
     state: r.state,
     address: fullAddress(r),
+    whyJoin: r.whyJoin || "",
     referrerRepId: r.referrerRepId,
     referrerName: r.referrerRepId ? nameOf[r.referrerRepId] || r.referrerRepId : "",
     signatureName: r.signatureName,
@@ -299,6 +336,7 @@ export async function listApplications({ status = "", limit = 200 } = {}) {
     reviewNote: r.reviewNote,
     rejectEmailSentAt: r.rejectEmailSentAt ? r.rejectEmailSentAt.getTime() : 0,
     rejectEmailError: r.rejectEmailError || "",
+    emails: (r.emails || []).map((e) => ({ kind: e.kind, to: e.to, ok: !!e.ok, error: e.error || "", at: e.at ? new Date(e.at).getTime() : 0 })),
     brevoSyncedAt: r.brevoSyncedAt ? r.brevoSyncedAt.getTime() : 0,
     brevoError: r.brevoError || "",
     ts: r.createdAt ? r.createdAt.getTime() : 0,
@@ -306,6 +344,26 @@ export async function listApplications({ status = "", limit = 200 } = {}) {
 }
 
 /* --------------------------------- Brevo -------------------------------- */
+
+/**
+ * The "brevo-rep-signups" job (Sync & logs, run by hand): saves EVERY sales
+ * agent sign-up to Brevo again - contact attributes + the sign-up list
+ * (REP_SIGNUP_BREVO_LIST). For sign-ups made before the list existed, or
+ * whose Brevo save failed. One at a time (Brevo rate-limits bursts).
+ */
+export async function syncAllRepApplicationsToBrevo() {
+  await connectDb();
+  const apps = await RepApplication.find({}, { termsText: 0, signedHtml: 0 }).sort({ createdAt: 1 }).lean();
+  let saved = 0;
+  const failed = [];
+  for (const app of apps) {
+    const res = await pushToBrevo(app);
+    if (res?.ok) saved++;
+    else if (!res?.skipped) failed.push(`${app.email}: ${res?.error || "failed"}`);
+    else return { total: apps.length, saved, skipped: "Brevo sync is off or BREVO_API_KEY is not set" };
+  }
+  return { total: apps.length, saved, failed: failed.length, errors: failed.slice(0, 5) };
+}
 
 /** Saves the application to Brevo and records the outcome on it. Never throws. */
 async function pushToBrevo(app, { referrerName } = {}) {
@@ -337,11 +395,150 @@ export async function applicationTerms(id) {
     : { ok: false, error: "Not found." };
 }
 
+/* ---------------------------- decision emails ----------------------------
+   Approve and Reject each email BOTH people: the applicant (the new Sales
+   Agent) and, when they came through a referral link, the Sales Agent who
+   referred them. Templates: Settings -> Sales rep sign-up. Every attempt is
+   kept on the application (`emails`) and shown to the admin; a failed email
+   never undoes the decision. */
+
+/** Fills a Settings template and sends it. A paragraph / line holding [Reason] is dropped when there is no reason. */
+async function sendTemplated(cfg, { to, subjectKey, bodyKey, subjectFallback, bodyFallback, values }) {
+  const reason = values.Reason || "";
+  const htmlValues = { ...values, Reason: escHtml(reason).replace(/\r?\n/g, "<br>") };
+  let body = String(cfg[bodyKey] || "").trim() || bodyFallback;
+  if (!reason) {
+    body = body
+      .replace(/<!--reason-->[\s\S]*?<!--\/reason-->/gi, "") // the template's Reason panel
+      .replace(/<p[^>]*>(?:(?!<\/p>)[\s\S])*\[Reason\][\s\S]*?<\/p>/gi, "")
+      .replace(/^.*\[Reason\].*$\n?/gm, "");
+  }
+  if (!/<[a-z][\s\S]*>/i.test(body)) body = body.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
+  const subject = fillTemplate(String(cfg[subjectKey] || "").trim() || subjectFallback, values);
+  await sendEmail({ to, subject, htmlBody: fillTemplate(body, htmlValues) });
+}
+
+/** The referring Sales Agent of an application: { repId, name, firstName, email } or null. */
+async function referrerOf(app) {
+  if (!app.referrerRepId) return null;
+  const r = await SalesRep.findOne({ repId: app.referrerRepId }, { repId: 1, name: 1, email: 1, customerId: 1 }).lean();
+  if (!r) return null;
+  let email = String(r.email || "").trim();
+  if (!email && r.customerId) email = (await Account.findOne({ customerId: r.customerId }, { email: 1 }).lean())?.email || "";
+  const name = String(r.name || r.repId).trim();
+  return { repId: r.repId, name, firstName: name.split(/\s+/)[0] || name, email };
+}
+
+/** Sends one decision email and records the outcome. Returns { ok, to, error }. */
+async function decisionEmail(app, kind, to, send) {
+  const at = new Date();
+  if (!to) {
+    const out = { kind, to: "", ok: false, error: "no email address on file", at };
+    await RepApplication.updateOne({ _id: app._id }, { $push: { emails: out } });
+    return out;
+  }
+  try {
+    await send();
+    const out = { kind, to, ok: true, error: "", at };
+    await RepApplication.updateOne({ _id: app._id }, { $push: { emails: out } });
+    return out;
+  } catch (err) {
+    const out = { kind, to, ok: false, error: String(err?.message || err).slice(0, 300), at };
+    await RepApplication.updateOne({ _id: app._id }, { $push: { emails: out } });
+    return out;
+  }
+}
+
+/** "x@y emailed; referrer a@b could not be emailed (why)". */
+function emailSummary(results) {
+  return results
+    .map((r) => (r.ok ? `${r.label} (${r.to}) emailed` : `${r.label} could not be emailed${r.to ? ` (${r.to})` : ""}: ${r.error}`))
+    .join("; ");
+}
+
 /**
- * Approve: creates the Sales Rep login (welcome email as for any new
- * account), on the default rates, referred by the link's rep.
+ * One decision email, ready to send: { to, args } for sendTemplated.
+ *   approved           -> the new Sales Agent (replaces the welcome email)
+ *   referrer-approved  -> the agent who referred them
+ *   rejected           -> the applicant (with the reason)
+ *   referrer-rejected  -> the agent who referred them (with the reason)
+ * Returns null when it does not apply (no referrer).
  */
-export async function approveApplication(id, { by = "", sendWelcome = true } = {}) {
+function decisionEmailSpec(app, kind, cfg, referrer) {
+  const contact = String(cfg.REP_SIGNUP_NOTIFY_EMAIL || cfg.SALES_EMAIL || "").trim();
+  const name = `${app.firstName || ""} ${app.lastName || ""}`.trim();
+  const link = welcomeLinkForRole(cfg.WELCOME_EMAIL_LINK, "Sales Rep");
+  const reason = String(app.reviewNote || "");
+  const applicant = { "First Name": app.firstName || "", "Last Name": app.lastName || "", Name: name, Email: app.email || "", "Contact Email": contact };
+  const aboutAgent = referrer && {
+    "First Name": referrer.firstName, Name: referrer.name, "Agent Name": name, "Agent First Name": app.firstName || "", "Contact Email": contact,
+  };
+  switch (kind) {
+    case "approved":
+      return {
+        to: app.email,
+        args: {
+          subjectKey: "REP_SIGNUP_APPROVED_SUBJECT", bodyKey: "REP_SIGNUP_APPROVED_BODY",
+          subjectFallback: "Your Protocol Therapeutics Sales Agent Account Is Approved", bodyFallback: APPROVED_BODY_DEFAULT,
+          values: { ...applicant, Link: link, "Referrer Name": referrer?.name || "" },
+        },
+      };
+    case "referrer-approved":
+      return referrer && {
+        to: referrer.email,
+        args: {
+          subjectKey: "REP_SIGNUP_REFERRER_APPROVED_SUBJECT", bodyKey: "REP_SIGNUP_REFERRER_APPROVED_BODY",
+          subjectFallback: "[Agent Name] Has Been Approved as a Sales Agent", bodyFallback: REFERRER_APPROVED_BODY_DEFAULT,
+          values: { ...aboutAgent, Link: link },
+        },
+      };
+    case "rejected":
+      return {
+        to: app.email,
+        args: {
+          subjectKey: "REP_SIGNUP_REJECT_SUBJECT", bodyKey: "REP_SIGNUP_REJECT_BODY",
+          subjectFallback: REJECT_SUBJECT_DEFAULT, bodyFallback: REJECT_BODY_DEFAULT,
+          values: { ...applicant, Reason: reason },
+        },
+      };
+    case "referrer-rejected":
+      return referrer && {
+        to: referrer.email,
+        args: {
+          subjectKey: "REP_SIGNUP_REFERRER_REJECT_SUBJECT", bodyKey: "REP_SIGNUP_REFERRER_REJECT_BODY",
+          subjectFallback: "Update on Your Referral: [Agent Name]", bodyFallback: REFERRER_REJECT_BODY_DEFAULT,
+          values: { ...aboutAgent, Reason: reason },
+        },
+      };
+    default:
+      return null;
+  }
+}
+
+/** Sends one decision email, records it, and returns the result with a label for messages. */
+async function sendDecision(app, kind, cfg, referrer) {
+  const spec = decisionEmailSpec(app, kind, cfg, referrer);
+  if (!spec) return null;
+  const out = await decisionEmail(app, kind, spec.to, () => sendTemplated(cfg, { to: spec.to, ...spec.args }));
+  const name = `${app.firstName || ""} ${app.lastName || ""}`.trim();
+  const label = kind.startsWith("referrer-") ? `referrer ${referrer.name}` : name || "the applicant";
+  // bookkeeping that depends on the email having gone out
+  if (kind === "rejected") {
+    await RepApplication.updateOne(
+      { _id: app._id },
+      out.ok ? { $set: { rejectEmailSentAt: new Date(), rejectEmailError: "" } } : { $set: { rejectEmailError: out.error } },
+    );
+  }
+  return { ...out, label };
+}
+
+/**
+ * Approve: creates the Sales Agent login on the default rates, referred by
+ * the link's agent. Instead of the usual welcome email the new agent gets the
+ * approval email (same login link); should that fail, the welcome email is
+ * sent as before. The referring agent is emailed too.
+ */
+export async function approveApplication(id, { by = "" } = {}) {
   await connectDb();
   const app = await RepApplication.findById(id).lean();
   if (!app) return { ok: false, error: "Sign-up not found." };
@@ -355,77 +552,118 @@ export async function approveApplication(id, { by = "", sendWelcome = true } = {
     firstName: app.firstName,
     lastName: app.lastName,
     email: app.email,
-    sendWelcome: String(sendWelcome),
+    sendWelcome: "false", // the approval email below is the welcome
   });
   if (!res.ok) {
     await RepApplication.updateOne({ _id: app._id }, { $set: { status: "Pending" } });
     return { ok: false, error: res.error || "Could not create the account." };
   }
   const repId = tagVal(res.tags || [], "rep_id:");
+  const customerId = String(res.customerId || "");
   await SalesRep.updateOne({ repId }, { $set: { phone: app.phone, applicationId: String(app._id) } });
   let referrerNote = "";
   if (app.referrerRepId) {
-    const r = await setReferrer(repId, app.referrerRepId, { by, note: "Sales rep sign-up approved" });
+    const r = await setReferrer(repId, app.referrerRepId, { by, note: "Sales agent sign-up approved" });
     if (!r.ok) referrerNote = ` Referrer not set: ${r.error}`;
   }
   await RepApplication.updateOne(
     { _id: app._id },
-    { $set: { status: "Approved", repId, customerId: String(res.customerId || ""), reviewedBy: String(by), reviewedAt: new Date() } },
+    { $set: { status: "Approved", repId, customerId, reviewedBy: String(by), reviewedAt: new Date() } },
   );
   invalidateResponses();
-  logEvent("sync", app.email, `sales rep sign-up approved -> ${repId} by ${by || "?"}`);
+  logEvent("sync", app.email, `sales agent sign-up approved -> ${repId} by ${by || "?"}`);
+
+  // ---- emails: the new agent (replaces the welcome email) + the referrer
+  const cfg = await getSettings();
+  const referrer = await referrerOf(app);
+  const name = `${app.firstName || ""} ${app.lastName || ""}`.trim();
+  const mine = await sendDecision(app, "approved", cfg, referrer);
+  if (mine.ok) {
+    // it was the welcome email - never send the standard one on top
+    await kvSet("welcome_sent:" + app.email.toLowerCase(), new Date().toISOString());
+    if (customerId) {
+      await Account.updateOne(
+        { customerId },
+        { $set: { welcomeEmailSentAt: new Date(), welcomeDueAt: null, welcomeResult: "sent (sales agent approval email)" } },
+      );
+    }
+  } else if (customerId) {
+    // fall back to the standard welcome email so they still get their login link
+    await retryWelcomeEmail(customerId).catch(() => {});
+  }
+  const results = [mine, await sendDecision(app, "referrer-approved", cfg, referrer)].filter(Boolean);
+
   pushToBrevo(await RepApplication.findById(app._id).lean());
-  return { ok: true, repId, message: `Approved - ${app.firstName} ${app.lastName} is now ${repId}.${referrerNote}` };
+  const allOk = results.every((r) => r.ok);
+  return {
+    ok: true,
+    warning: !allOk,
+    repId,
+    message:
+      `Approved - ${name} is now ${repId}.${referrerNote} ${emailSummary(results)}.` +
+      (mine.ok ? "" : " The standard welcome email (with the login link) was queued instead."),
+  };
 }
 
-const REJECT_SUBJECT_DEFAULT = "Update on Your Protocol Therapeutics Sales Rep Application";
-
 /**
- * Reject: keeps the record. With `notify`, emails the applicant the reason
- * (Settings -> REP_SIGNUP_REJECT_SUBJECT / REP_SIGNUP_REJECT_BODY); the
- * reason is then required. A failed email never undoes the rejection - the
- * message says so and the failure is kept on the application.
+ * Reject: keeps the record. With `notify`, the applicant AND the agent who
+ * referred them are emailed the reason (Settings -> REP_SIGNUP_REJECT_* and
+ * REP_SIGNUP_REFERRER_REJECT_*); the reason is then required. The reason and
+ * the decision always go to Brevo.
  */
 export async function rejectApplication(id, { by = "", note = "", notify = false } = {}) {
   await connectDb();
   const reason = String(note || "").trim().slice(0, 500);
-  if (notify && !reason) return { ok: false, error: "Enter the reason - it is emailed to the applicant." };
+  if (notify && !reason) return { ok: false, error: "Enter the reason - it is included in the rejection emails." };
   const res = await RepApplication.updateOne(
     { _id: id, status: "Pending" },
     { $set: { status: "Rejected", reviewedBy: String(by), reviewedAt: new Date(), reviewNote: reason } },
   );
   if (!res.modifiedCount) return { ok: false, error: "Only a pending sign-up can be rejected." };
   invalidateResponses();
-  logEvent("sync", String(id), `sales rep sign-up rejected by ${by || "?"}`);
+  logEvent("sync", String(id), `sales agent sign-up rejected by ${by || "?"}`);
   const app = await RepApplication.findById(id).lean();
-  pushToBrevo(app);
 
-  if (!notify) return { ok: true, message: "Sign-up rejected (no email sent)." };
-  try {
-    await sendRejectEmail(app, reason);
-    await RepApplication.updateOne({ _id: app._id }, { $set: { rejectEmailSentAt: new Date(), rejectEmailError: "" } });
-    return { ok: true, message: `Sign-up rejected - ${app.email} was emailed the reason.` };
-  } catch (err) {
-    const why = String(err?.message || err).slice(0, 300);
-    await RepApplication.updateOne({ _id: app._id }, { $set: { rejectEmailError: why } });
-    return { ok: true, warning: true, message: `Sign-up rejected, but the email to ${app.email} could not be sent: ${why}` };
+  if (!notify) {
+    pushToBrevo(app);
+    return { ok: true, message: "Sign-up rejected (no emails sent)." };
   }
+  const cfg = await getSettings();
+  const referrer = await referrerOf(app);
+  const results = [
+    await sendDecision(app, "rejected", cfg, referrer),
+    await sendDecision(app, "referrer-rejected", cfg, referrer),
+  ].filter(Boolean);
+
+  pushToBrevo(await RepApplication.findById(app._id).lean());
+  const allOk = results.every((r) => r.ok);
+  return { ok: true, warning: !allOk, message: `Sign-up rejected - ${emailSummary(results)}.` };
 }
 
-/** The rejection email. A paragraph / line holding [Reason] is dropped when there is no reason. */
-async function sendRejectEmail(app, reason) {
+/**
+ * "Resend failed emails": sends again every decision email of an approved /
+ * rejected sign-up whose LAST attempt failed. The new agent's approval email
+ * is not resent - when it failed, the standard welcome email (with the same
+ * login link) already went out instead.
+ */
+export async function resendFailedDecisionEmails(id) {
+  await connectDb();
+  const app = await RepApplication.findById(id).lean();
+  if (!app) return { ok: false, error: "Sign-up not found." };
+  const last = {};
+  for (const e of app.emails || []) last[e.kind] = e; // kept in send order - the last one wins
+  const kinds = Object.keys(last).filter((k) => !last[k].ok && k !== "approved");
+  if (!kinds.length) return { ok: true, message: "No failed emails to resend." };
   const cfg = await getSettings();
-  const values = {
-    "First Name": app.firstName || "",
-    "Last Name": app.lastName || "",
-    Name: `${app.firstName || ""} ${app.lastName || ""}`.trim(),
-    Email: app.email || "",
-    Reason: escHtml(reason).replace(/\r?\n/g, "<br>"),
-    "Contact Email": String(cfg.REP_SIGNUP_NOTIFY_EMAIL || cfg.SALES_EMAIL || "").trim(),
-  };
-  let body = String(cfg.REP_SIGNUP_REJECT_BODY || "").trim() || REJECT_BODY_DEFAULT;
-  if (!reason) body = body.replace(/<p[^>]*>(?:(?!<\/p>)[\s\S])*\[Reason\][\s\S]*?<\/p>/gi, "").replace(/^.*\[Reason\].*$\n?/gm, "");
-  if (!/<[a-z][\s\S]*>/i.test(body)) body = body.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
-  const subject = fillTemplate(String(cfg.REP_SIGNUP_REJECT_SUBJECT || "").trim() || REJECT_SUBJECT_DEFAULT, { ...values, Reason: reason });
-  await sendEmail({ to: app.email, subject, htmlBody: fillTemplate(body, values) });
+  const referrer = await referrerOf(app);
+  const results = [];
+  for (const kind of kinds) {
+    const r = await sendDecision(app, kind, cfg, referrer);
+    if (r) results.push(r);
+  }
+  invalidateResponses();
+  const allOk = results.every((r) => r.ok);
+  return { ok: allOk, warning: !allOk, message: `Resent - ${emailSummary(results)}.` };
 }
+
+const REJECT_SUBJECT_DEFAULT = "Update on Your Protocol Therapeutics Sales Agent Application";

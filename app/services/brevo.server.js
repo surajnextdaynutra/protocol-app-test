@@ -7,8 +7,38 @@ import { logEvent } from "./log.server";
 
 const BREVO = "https://api.brevo.com/v3";
 
+/* Network-level failures worth a retry: the request never got a reply
+   because the connection itself broke. Seen on the server as "fetch failed"
+   on the FIRST Brevo call after the app sat idle (a pooled keep-alive
+   connection Brevo had already closed) - the same call a moment later works.
+   An HTTP error reply from Brevo (4xx / 5xx) is NOT retried, and neither is
+   our own 15 s timeout (Brevo may have accepted the request). */
+const RETRY_CODES = new Set([
+  "ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH",
+  "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_CLOSED",
+]);
+function isNetworkFailure(err) {
+  if (!err || err.name === "AbortError" || err.name === "TimeoutError") return false;
+  const code = err.cause?.code || err.code || "";
+  return RETRY_CODES.has(code) || (err instanceof TypeError && /fetch failed/i.test(err.message) && !code);
+}
+
+/** fetch() for Brevo calls: up to 2 retries (0.5 s, then 1.5 s) on a broken connection. */
+export async function brevoFetch(url, options = {}) {
+  const delays = [500, 1500];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      // a fresh timeout per attempt (an AbortSignal can only fire once)
+      return await fetch(url, { ...options, signal: AbortSignal.timeout(15000) });
+    } catch (err) {
+      if (attempt >= delays.length || !isNetworkFailure(err)) throw err;
+      await new Promise((r) => setTimeout(r, delays[attempt]));
+    }
+  }
+}
+
 async function brevoPost(path, apiKey, payload) {
-  const res = await fetch(BREVO + path, {
+  const res = await brevoFetch(BREVO + path, {
     method: "POST",
     headers: {
       "api-key": apiKey,
@@ -175,7 +205,7 @@ export const BREVO_ROLE_ATTRIBUTE = "USER_ROLE";
 let roleAttrReady = false;
 async function ensureRoleAttribute(apiKey) {
   if (roleAttrReady) return;
-  const res = await fetch(`${BREVO}/contacts/attributes/normal/${BREVO_ROLE_ATTRIBUTE}`, {
+  const res = await brevoFetch(`${BREVO}/contacts/attributes/normal/${BREVO_ROLE_ATTRIBUTE}`, {
     method: "POST",
     headers: { "api-key": apiKey, accept: "application/json", "content-type": "application/json" },
     body: JSON.stringify({ type: "text" }),
@@ -223,7 +253,7 @@ export function setBrevoContactRole({ email, first, last, role }) {
       // when the contact isn't in those lists, which is the usual case.
       const others = Object.entries(lists).filter(([r]) => r !== role).map(([, id]) => id);
       if (others.length) {
-        await fetch(`${BREVO}/contacts/${encodeURIComponent(email)}?identifierType=email_id`, {
+        await brevoFetch(`${BREVO}/contacts/${encodeURIComponent(email)}?identifierType=email_id`, {
           method: "PUT",
           headers: { "api-key": cfg.BREVO_API_KEY, accept: "application/json", "content-type": "application/json" },
           body: JSON.stringify({ unlinkListIds: others }),
@@ -246,8 +276,9 @@ export function setBrevoContactRole({ email, first, last, role }) {
 /* Every sales rep sign-up is saved on the applicant's Brevo contact, with
    timestamps, and kept in step when it is approved or rejected. The custom
    attributes are created in Brevo the first time (an existing one is left
-   as it is). Optionally the contact is also added to a list
-   (REP_SIGNUP_BREVO_LIST: a list id or exact list name). */
+   as it is). The contact is also added to the list REP_SIGNUP_BREVO_LIST
+   (default "Referred Sales Agents"; a list id or exact list name, created in
+   Brevo when it does not exist; NONE = no list). */
 const REP_ATTRS = {
   REP_SIGNUP_STATUS: "text", // Pending / Approved / Rejected
   REP_SIGNUP_DATE: "date", // day submitted (for Brevo date filters)
@@ -256,6 +287,7 @@ const REP_ATTRS = {
   TERMS_ACCEPTED_AT: "text",
   TERMS_VERSION: "text",
   REP_BUSINESS_NAME: "text",
+  REP_WHY_JOIN: "text", // "Why I want to be a Sales Agent for Protocol Therapeutics" (max 500)
   ADDRESS: "text",
   CITY: "text",
   STATE: "text",
@@ -274,7 +306,7 @@ async function ensureRepAttributes(apiKey) {
   if (repAttrsReady) return;
   let all = true;
   for (const [name, type] of Object.entries(REP_ATTRS)) {
-    const res = await fetch(`${BREVO}/contacts/attributes/normal/${name}`, {
+    const res = await brevoFetch(`${BREVO}/contacts/attributes/normal/${name}`, {
       method: "POST",
       headers: { "api-key": apiKey, accept: "application/json", "content-type": "application/json" },
       body: JSON.stringify({ type }),
@@ -293,22 +325,47 @@ const human = (d) =>
     : "";
 const ymd = (d) => (d ? new Date(d).toLocaleDateString("en-CA", { timeZone: SIGNUP_TZ }) : "");
 
+const listIdCache = new Map(); // lower-cased list name -> Brevo list id
+
+async function brevoGet(cfg, pathQs) {
+  const res = await brevoFetch(BREVO + pathQs, {
+    headers: { "api-key": cfg.BREVO_API_KEY, accept: "application/json" },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) throw new Error(`Brevo GET ${pathQs.split("?")[0]} failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
+/** A contacts folder to put a new list in (Brevo requires one): the first existing folder, else a new one. */
+async function brevoFolderId(cfg) {
+  const folders = (await brevoGet(cfg, "/contacts/folders?limit=50&offset=0")).folders || [];
+  if (folders.length) return folders[0].id;
+  return (await brevoPost("/contacts/folders", cfg.BREVO_API_KEY, { name: "Protocol Therapeutics" })).id;
+}
+
+/**
+ * The Brevo list id for a list id or exact list name; a name that does not
+ * exist yet is CREATED. "NONE" / blank = no list (0).
+ */
 async function brevoListId(cfg, wanted) {
   const w = String(wanted || "").trim();
-  if (!w) return 0;
+  if (!w || w.toUpperCase() === "NONE") return 0;
   if (/^\d+$/.test(w)) return Number(w);
-  for (let offset = 0; offset < 500; offset += 50) {
-    const res = await fetch(`${BREVO}/contacts/lists?limit=50&offset=${offset}&sort=desc`, {
-      headers: { "api-key": cfg.BREVO_API_KEY, accept: "application/json" },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!res.ok) return 0;
-    const lists = (await res.json())?.lists || [];
-    const hit = lists.find((l) => String(l.name || "").trim().toLowerCase() === w.toLowerCase());
-    if (hit) return hit.id;
-    if (lists.length < 50) return 0;
+  const key = w.toLowerCase();
+  if (listIdCache.has(key)) return listIdCache.get(key);
+  for (let offset = 0; offset < 1000; offset += 50) {
+    const lists = (await brevoGet(cfg, `/contacts/lists?limit=50&offset=${offset}&sort=desc`)).lists || [];
+    const hit = lists.find((l) => String(l.name || "").trim().toLowerCase() === key);
+    if (hit) {
+      listIdCache.set(key, hit.id);
+      return hit.id;
+    }
+    if (lists.length < 50) break;
   }
-  return 0;
+  const created = await brevoPost("/contacts/lists", cfg.BREVO_API_KEY, { name: w, folderId: await brevoFolderId(cfg) });
+  listIdCache.set(key, created.id);
+  logEvent("sync", "brevo-list", `Brevo list "${w}" created (id ${created.id})`);
+  return created.id;
 }
 
 let repQueue = Promise.resolve();
@@ -337,6 +394,7 @@ export function syncRepApplicantToBrevo(app, { referrerName = "" } = {}) {
         TERMS_ACCEPTED_AT: human(app.signedAt),
         TERMS_VERSION: app.termsVersion || "",
         REP_BUSINESS_NAME: app.company || "",
+        REP_WHY_JOIN: app.whyJoin || "",
         ADDRESS: app.address || "",
         CITY: app.city || "",
         STATE: app.state || "",
@@ -353,7 +411,15 @@ export function syncRepApplicantToBrevo(app, { referrerName = "" } = {}) {
       if (!attributes.REP_SIGNUP_DATE) delete attributes.REP_SIGNUP_DATE; // a blank date is refused
       const payload = { email, attributes: { ...attributes }, updateEnabled: true };
       if (digits.length === 10) payload.attributes.SMS = "+1" + digits;
-      const listId = await brevoListId(cfg, cfg.REP_SIGNUP_BREVO_LIST);
+      // the list ("Referred Sales Agents" - created in Brevo when missing); a
+      // list problem never stops the contact itself from being saved
+      let listId = 0, listError = "";
+      try {
+        listId = await brevoListId(cfg, cfg.REP_SIGNUP_BREVO_LIST);
+      } catch (err) {
+        listError = String(err?.message || err).slice(0, 200);
+        logEvent("error", email, `Brevo list "${cfg.REP_SIGNUP_BREVO_LIST}": ${listError}`, null, false);
+      }
       if (listId) payload.listIds = [listId];
       try {
         await brevoPost("/contacts", cfg.BREVO_API_KEY, payload);
@@ -363,8 +429,8 @@ export function syncRepApplicantToBrevo(app, { referrerName = "" } = {}) {
         delete payload.attributes.SMS;
         await brevoPost("/contacts", cfg.BREVO_API_KEY, payload);
       }
-      logEvent("sync", email, `Brevo: sales rep sign-up saved (${attributes.REP_SIGNUP_STATUS})`);
-      return { ok: true };
+      logEvent("sync", email, `Brevo: sales rep sign-up saved (${attributes.REP_SIGNUP_STATUS})${listId ? `, in list ${listId}` : ""}`);
+      return listError ? { ok: false, error: `saved, but not added to the list: ${listError}` } : { ok: true, listId };
     } catch (err) {
       const msg = String(err?.message || err).slice(0, 300);
       logEvent("error", email, `Brevo sales rep sign-up: ${msg}`, null, false);

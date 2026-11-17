@@ -39,7 +39,7 @@ import {
 } from "../services/exec-commissions.server";
 import { markNoticesSeen, rowHistory, saveRepRow } from "../services/rep-rates.server";
 import { repCommissionUpdates, repEarningHistory, repEarnings } from "../services/rep-earnings.server";
-import { signupInfo, submitSignup } from "../services/rep-signup.server";
+import { resendFailedDecisionEmails, signupInfo, submitSignup } from "../services/rep-signup.server";
 import { repTeam } from "../services/rep-team.server";
 import {
   clinicDoctors,
@@ -472,6 +472,11 @@ const finance = {
       note: p.note,
       notify: p.notify === true || String(p.notify) === "true",
     });
+  },
+  // sends again the approve / reject emails whose last attempt failed
+  resendSignupEmails: async ({ p, caller }) => {
+    requireFinance(caller);
+    return resendFailedDecisionEmails(String(p.id || ""));
   },
 };
 

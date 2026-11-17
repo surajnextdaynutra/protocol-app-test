@@ -7,6 +7,7 @@ import { syncRecentOrders } from "./orders.server";
 import { runPrescriptionReminders } from "./prescriptions.server";
 import { reconcilePatientPrices, syncAllProducts } from "./products.server";
 import { sendDueWelcomeEmails } from "./provisioning.server";
+import { syncAllRepApplicationsToBrevo } from "./rep-signup.server";
 import { invalidateResponses } from "./response-cache.server";
 
 /* Timed jobs (were the Google time-driven triggers). They run inside the app
@@ -32,6 +33,8 @@ const JOBS = [
   { name: "price-reconcile", schedule: "25 * * * *", run: reconcilePatientPrices },
   // manual: writes USER_ROLE onto every existing Brevo contact (webhooks keep it current after)
   { name: "brevo-roles", run: syncAllBrevoRoles },
+  // manual: every Sales Agent sign-up -> its Brevo contact + the "Referred Sales Agents" list
+  { name: "brevo-rep-signups", run: syncAllRepApplicationsToBrevo },
 ];
 
 const running = new Set();

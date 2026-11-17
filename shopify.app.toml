@@ -6,7 +6,7 @@ client_id = "93bbe1c8f5f7d979eb20776c6197b6ab"
 name = "Test Protocol Therapeutics"
 # application_url = "https://test.protocoltherapeutics.com"
 # application_url = "https://api.protocoltherapeutics.com"
-application_url = "https://cell-pie-tennis-lying.trycloudflare.com"
+application_url = "https://properties-metal-larger-transportation.trycloudflare.com"
 embedded = true
 
 [webhooks]
@@ -54,7 +54,7 @@ scopes = "read_all_orders,read_customers,read_files,read_inventory,read_location
 
 [auth]
 # redirect_urls = [ "https://test.protocoltherapeutics.com/auth/callback", "https://test.protocoltherapeutics.com/api/auth" ]
-redirect_urls = [ "https://cell-pie-tennis-lying.trycloudflare.com/auth/callback", "https://cell-pie-tennis-lying.trycloudflare.com/api/auth" ]
+redirect_urls = [ "https://properties-metal-larger-transportation.trycloudflare.com/auth/callback", "https://properties-metal-larger-transportation.trycloudflare.com/api/auth" ]
 # redirect_urls = [ "https://api.protocoltherapeutics.com/auth/callback", "https://api.protocoltherapeutics.com/api/auth" ]
 
 [build]

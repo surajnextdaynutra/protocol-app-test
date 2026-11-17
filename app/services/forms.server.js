@@ -3,6 +3,7 @@ import { FormEntry } from "../models/index.server";
 import { logEvent } from "./log.server";
 import { getSettings, isTrue } from "./settings.server";
 import { READ_ONLY } from "./shopify-admin.server";
+import { brevoFetch } from "./brevo.server";
 
 /* Website forms (were the "form" and "contact-support-form" scripts).
 
@@ -35,7 +36,7 @@ async function sendPlainEmail(toEmail, toName, subject, textBody, replyToEmail) 
   };
   if (replyToEmail) payload.replyTo = { email: replyToEmail };
   try {
-    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    const res = await brevoFetch("https://api.brevo.com/v3/smtp/email", {
       method: "POST",
       headers: { "api-key": cfg.BREVO_API_KEY, accept: "application/json", "content-type": "application/json" },
       body: JSON.stringify(payload),
@@ -337,7 +338,7 @@ const CONTACT_ATTRIBUTES = {
 const NUMERIC_DEAL_FIELDS = new Set(["numClinics", "numPhysicians"]);
 
 async function brevo(cfg, method, path, body) {
-  const res = await fetch("https://api.brevo.com/v3" + path, {
+  const res = await brevoFetch("https://api.brevo.com/v3" + path, {
     method,
     headers: { "api-key": cfg.BREVO_API_KEY, accept: "application/json", "content-type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,

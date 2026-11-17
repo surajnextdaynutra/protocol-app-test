@@ -17,6 +17,7 @@ import {
 } from "./shopify-admin.server";
 import { WELCOME_DEFAULT_BODY, WELCOME_DEFAULT_SUBJECT } from "./welcome-default.server";
 import { welcomeLinkForRole } from "../components/welcome-link";
+import { brevoFetch } from "./brevo.server";
 
 /* Creating portal accounts (was the "Customer details" sheet + Shopify
    Customer Sync script, and the "rxmaster id auto generator").
@@ -824,7 +825,7 @@ export async function sendWelcomeEmail({ firstName, lastName, email, role, test 
   const subject = (test ? "[Test] " : "") + (fill(subjectTpl) || "Welcome");
 
   try {
-    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    const res = await brevoFetch("https://api.brevo.com/v3/smtp/email", {
       method: "POST",
       headers: { "api-key": cfg.BREVO_API_KEY, accept: "application/json", "content-type": "application/json" },
       body: JSON.stringify({

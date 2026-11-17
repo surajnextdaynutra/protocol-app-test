@@ -89,6 +89,10 @@ check("only B got the per-rep notice", (await R.repNotices("RAP1")).length, 1);
 check("B has 2 notices", (await R.repNotices("RAP2")).length, 2);
 check("referral rate above $0.20 allowed (no cap)", (await R.setRepRate("RAP1", "referral", "0.25")).ok, true);
 check("A referral rate own", (await R.setRepRate("RAP1", "referral", "0.15")).ok, true);
+check("new referral starts with its own $0.20", (await M.SalesRep.findOne({ repId: "RAP2" }).lean()).sponsorRate, 0.2);
+c = await C.computeOrderCommission(lines, ids, { at: new Date(Date.now() + 1000) });
+check("B's own $0.20 wins over A's rate for everyone", c.refAmt, 0.6);
+check("B's referral rate back to A's rate", (await R.setSponsorRate("RAP2", "default", { by: "test" })).ok, true);
 c = await C.computeOrderCommission(lines, ids, { at: new Date(Date.now() + 1000) });
 check("A earns own referral $0.15 x3", c.refAmt, 0.45);
 check("back to default", (await R.setRepRate("RAP2", "direct", "default")).to, null);
@@ -96,7 +100,8 @@ c = await C.computeOrderCommission(lines, ids, { at: new Date(Date.now() + 1000)
 check("B back on default $1.10", c.repAmt, 3.3);
 
 const hist = await R.rateHistory({ repId: "RAP2" });
-check("B history: referrer + default + 2 own changes", hist.length, 4);
+check("B history: referrer + $0.20 start + default + 2 own + referral reset", hist.length, 6);
+check("B history notes the $0.20 start", hist.some((h) => h.kind === "sponsor" && h.to === 0.2 && h.note === "Default for a new referral"), true);
 const histC = await R.rateHistory({ repId: "RAP3" });
 check("C history shows the default change only", histC.length, 1);
 
@@ -136,7 +141,7 @@ check("B's units", team.team[0].units, 3);
 check("A earned from B", team.team[0].earned, 0.6);
 check("one referral order", team.referralOrders.length, 1);
 check("A referral earnings", team.earnings.referral, 0.6);
-check("A unseen notices (default change + 2 own referral rates)", team.unseenNotices, 3);
+check("A unseen notices (default change + 2 own referral rates + B referral reset)", team.unseenNotices, 4);
 await R.markNoticesSeen("RAP1");
 check("notices seen", (await repTeam({ rep: "RAP1" })).unseenNotices, 0);
 
@@ -150,8 +155,13 @@ check("bad code flagged", (await S.signupInfo({ ref: "ZZZZZZZZ" })).refInvalid, 
 const form = {
   ref: team.referralCode, firstName: "Dana", lastName: "Lee", email: "dana@test.local", phone: "(555) 234-5678",
   address: "1 Main St", city: "Austin", state: "Texas", zip: "73301",
+  whyJoin: "I work with clinics in Austin.\r\n\r\n\r\nI want to grow with the team.",
   agree: true, termsVersion: info.termsVersion,
 };
+check("why: required", !!S.validateSignupFields({ ...form, whyJoin: "   " }).fields.whyJoin, true);
+check("why: 500 characters allowed", !S.validateSignupFields({ ...form, whyJoin: "a".repeat(500) }).fields.whyJoin, true);
+check("why: 501 characters refused", !!S.validateSignupFields({ ...form, whyJoin: "a".repeat(501) }).fields.whyJoin, true);
+check("why: line breaks kept, blank runs squeezed", S.validateSignupFields(form).v.whyJoin, "I work with clinics in Austin.\n\nI want to grow with the team.");
 // field validation (same rules as the sign-up page)
 const fieldErr = async (patch, key) => !!(await S.submitSignup({ ...form, ...patch }, null)).fields?.[key];
 check("first name: digits refused", await fieldErr({ firstName: "Dana2" }, "firstName"), true);
@@ -172,15 +182,31 @@ check("zip: 4 digits refused", await fieldErr({ zip: "7330" }, "zip"), true);
 check("zip: ZIP+4 allowed", okField({ zip: "73301-1234" }, "zip"), true);
 check("phone: +1 and spaces allowed", okField({ phone: "+1 555 234 5678" }, "phone"), true);
 check("whole form valid, no typed signature needed", Object.keys(S.validateSignupFields(form).fields).length, 0);
+check("agreement names the person, not the business",
+  S.fillAgreement("and [[agent_name]] (Sales Agent)", { ...form, company: "Lee & Co" }, new Date()), "and Dana Lee (Sales Agent)");
+check("address fields optional (page no longer asks)",
+  Object.keys(S.validateSignupFields({ ...form, address: "", city: "", state: "", zip: "" }).fields).length, 0);
 check("must agree", !!(await S.submitSignup({ ...form, agree: false }, null)).fields?.agree, true);
 check("stale terms refused", (await S.submitSignup({ ...form, termsVersion: "old" }, null)).termsChanged, true);
 check("valid sign-up", (await S.submitSignup(form, null)).ok, true);
 check("duplicate pending refused", (await S.submitSignup(form, null)).ok, false);
+// the visitor's address: first X-Forwarded-For entry, not the proxy's cf-connecting-ip
+const viaProxy = { headers: new Headers({ "x-forwarded-for": "203.0.113.7, 198.51.100.2", "cf-connecting-ip": "2a06:98c0:3600::103" }) };
+check("proxied sign-up saved", (await S.submitSignup({ ...form, email: "proxy1@test.local" }, viaProxy)).ok, true);
+const proxied = await M.RepApplication.findOne({ email: "proxy1@test.local" }).lean();
+check("visitor IP = first X-Forwarded-For entry", proxied?.ip, "203.0.113.7");
+check("raw address headers kept", proxied?.ipHeaders?.cfConnectingIp, "2a06:98c0:3600::103");
+// no per-address limit: many sign-ups from one address are all accepted
+let manyOk = 0;
+for (let i = 2; i <= 8; i++) if ((await S.submitSignup({ ...form, email: `proxy${i}@test.local` }, viaProxy)).ok) manyOk++;
+check("no sign-up limit per address", manyOk, 7);
+await M.RepApplication.deleteMany({ email: /^proxy\d@test\.local$/ });
 const apps = await S.listApplications({ status: "Pending" });
 check("pending with referrer", apps[0]?.referrerRepId, "RAP1");
 check("phone stored normalised", apps[0]?.phone, "555-234-5678");
 check("state stored as code", apps[0]?.state, "TX");
 check("full name stands as the acceptance", apps[0]?.signatureName, "Dana Lee");
+check("why answer stored", apps[0]?.whyJoin, "I work with clinics in Austin.\n\nI want to grow with the team.");
 const terms = await S.applicationTerms(apps[0].id);
 check("signed terms kept word for word", terms.terms, "Agreement text for this test.");
 check("reject + email needs a reason", (await S.rejectApplication(apps[0].id, { by: "test", note: " ", notify: true })).ok, false);
@@ -193,6 +219,10 @@ const rejected = (await S.listApplications({ status: "Rejected" }))[0];
 check("reject reason kept", rejected?.reviewNote, "Territory already covered");
 check("email failure kept", !!rejected?.rejectEmailError, true);
 check("only pending can be rejected", (await S.rejectApplication(apps[0].id, { by: "test" })).ok, false);
+// rejection emails go to the applicant AND the referring agent (both recorded)
+check("reject emails: applicant + referrer attempted", (rejected?.emails || []).map((e) => e.kind).sort().join(","), "referrer-rejected,rejected");
+check("reject emails: applicant address", (rejected?.emails || []).find((e) => e.kind === "rejected")?.to, "dana@test.local");
+check("reject message names the referrer", /referrer/i.test(rej.message), true);
 
 /* ---- per-referral rate, per-practice rate, Sales Reps History / Edit ---- */
 const later = () => new Date(Date.now() + 1000);
@@ -228,14 +258,14 @@ check("practice rate saved", (await M.SalesRep.findOne({ repId: "RAP3" }).lean()
 
 const hRef = await R.rowHistory({ type: "referred", repId: "RAP1", childId: "RAP2" });
 check("referred history ok", hRef.ok, true);
-check("referred history: added under A", hRef.rows.some((h) => h.type === "Sales Rep Added"), true);
+check("referred history: added under A", hRef.rows.some((h) => h.type === "Sales Agent Added"), true);
 check("referred history: rate update", hRef.rows.some((h) => h.type === "Commission Update" && /\$0\.05 to \$0\.10/.test(h.details)), true);
 check("referred history: status change", hRef.rows.some((h) => /Status changed from Active to Inactive/.test(h.details)), true);
 check("changed-by shows the person", hRef.rows.find((h) => h.type === "Commission Update")?.by, "Exec");
 const hPrac = await R.rowHistory({ type: "practice", repId: "RAP3", practiceId: "PRA9" });
 check("practice history: set to $0.90", hPrac.rows[0]?.details, "Commission / Unit set to $0.90.");
 const hRep = await R.rowHistory({ type: "rep", repId: "RAP3" });
-check("rep history: added", hRep.rows.some((h) => h.type === "Sales Rep Added"), true);
+check("rep history: added", hRep.rows.some((h) => h.type === "Sales Agent Added"), true);
 check("rep history: own rate", hRep.rows.some((h) => /Commission \/ Unit set to \$1\.25/.test(h.details)), true);
 await R.saveRepRow({ type: "referred", rep: "RAP1", child: "RAP2", active: true }); // back to active for the checks below
 

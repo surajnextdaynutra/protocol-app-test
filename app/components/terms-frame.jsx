@@ -10,9 +10,12 @@ const BASE_STYLE =
   "color:#2B3440;background:#fff;word-wrap:break-word}h1,h2,h3,h4{color:#143056;line-height:1.3;margin:1.1em 0 .45em}" +
   "h1{font-size:20px}h2{font-size:17px}h3{font-size:15px}p{margin:0 0 .8em}ul,ol{margin:0 0 .9em;padding-left:1.4em}" +
   "a{color:#143056}table{border-collapse:collapse;max-width:100%}td,th{border:1px solid #D5DBE3;padding:4px 8px}" +
-  "img{max-width:100%;height:auto}.pt-plain{white-space:pre-wrap;margin:0;font:inherit}</style>" +
+  "img{max-width:100%;height:auto}.pt-plain{white-space:pre-wrap;margin:0;font:inherit}" +
+  // the site's font (Inter) wins over the uploaded file's own fonts; only the signature keeps its script font
+  "body,body *:not(.pt-signature){font-family:Inter,system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif !important}" +
+  "</style>" +
   '<base target="_blank">' +
-  '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600&display=swap">';
+  '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Dancing+Script:wght@600&display=swap">';
 
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 

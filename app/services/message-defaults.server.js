@@ -37,6 +37,8 @@ export const ORDER_UPDATED_BODY_DEFAULT =
 /* The app's earlier, shorter defaults. A setting still holding one of these
    word-for-word was never really edited, so it now reads as the new default. */
 export const OLD_DEFAULTS = {
+  // "Sales Rep" -> "Sales Agent" (client wording, 2026-11-18)
+  REP_SIGNUP_REJECT_SUBJECT: "Update on Your Protocol Therapeutics Sales Rep Application",
   NOT_OPENED_BODY: 'Hi <b>[name]</b>,<br><br>Your protocol is waiting.<br><br>To view it, <a href="[link]" style="color:#2B4EFF;font-weight:700;">Click Here</a>.<br><br>Please note: <b>[validity]</b><br><br>Thank you,',
   ABANDONED_BODY: 'Hi <b>[name]</b>,<br><br>You left your recommended items in your cart.<br><br>To complete your order, <a href="[link]" style="color:#2B4EFF;font-weight:700;">Click Here</a>.<br><br>Please note: <b>[validity]</b><br><br>Thank you,',
   EXPIRY_BODY: 'Hi <b>[name]</b>,<br><br>Your protocol link will expire soon.<br><br>To complete your order in time, <a href="[link]" style="color:#2B4EFF;font-weight:700;">Click Here</a>.<br><br>Please note: <b>[validity]</b><br><br>Thank you,',

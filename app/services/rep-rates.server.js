@@ -21,6 +21,9 @@ export const KINDS = {
   // (a kind may set `max` to cap its rates; referral has no cap since 2026-11-14)
   referral: { key: "REFERRAL_COMMISSION_PER_UNIT", field: "referralRate", fallback: 0.2, label: "referral" },
 };
+/** $ per unit a referrer earns on a NEW referral - set as that referral's own
+ *  rate when the referrer is attached (setReferrer), editable afterwards. */
+export const NEW_REFERRAL_RATE = 0.2;
 /** Settings key -> rate kind (the Settings page routes these through setDefaultRate). */
 export const DEFAULT_RATE_KEYS = Object.fromEntries(Object.entries(KINDS).map(([k, v]) => [v.key, k]));
 
@@ -406,8 +409,8 @@ export async function updateRepProfile(repId, { name, active } = {}, { by = "" }
   const effectiveAt = new Date();
   if (name !== undefined) {
     const n = String(name || "").trim();
-    if (!n) return { ok: false, error: "Sales Rep Name is required." };
-    if (n.length > 120) return { ok: false, error: "Sales Rep Name is too long." };
+    if (!n) return { ok: false, error: "Sales Agent Name is required." };
+    if (n.length > 120) return { ok: false, error: "Sales Agent Name is too long." };
     if (n !== (rep.name || "")) {
       set.name = n;
       changes.push({ kind: "name", from: rep.name || "", to: n });
@@ -435,7 +438,7 @@ export async function updateRepProfile(repId, { name, active } = {}, { by = "" }
  *   type "practice" - the rep's rate on that one practice
  *   type "referred" - `childId` as a referral of `repId`: when they were
  *                     added under that rep, the referral rate, name / status
- * Rows: { ts, type: "Commission Update" | "Sales Rep Added" | "Settings", details, by }.
+ * Rows: { ts, type: "Commission Update" | "Sales Agent Added" | "Settings", details, by }.
  */
 export async function rowHistory({ type = "rep", repId = "", practiceId = "", childId = "" } = {}) {
   await connectDb();
@@ -471,7 +474,7 @@ export async function rowHistory({ type = "rep", repId = "", practiceId = "", ch
     for (const c of rows) {
       if (c.kind === "sponsor") rateRow(c, "Commission / Unit", "the referrer's rate");
       else if (c.kind === "referrer") {
-        if (c.to === repId) push(c.effectiveAt, "Sales Rep Added", `${rep.name || who} was added as a referred sales rep.`, c.by);
+        if (c.to === repId) push(c.effectiveAt, "Sales Agent Added", `${rep.name || who} was added as a referred Sales Agent.`, c.by);
         else if (c.from === repId) push(c.effectiveAt, "Settings", `${rep.name || who} was moved to ${c.to ? names[c.to] || c.to : "no referrer"}.`, c.by);
       } else profileRow(c);
     }
@@ -489,7 +492,7 @@ export async function rowHistory({ type = "rep", repId = "", practiceId = "", ch
         push(h.ts, "Commission Update", `Standard Commission / Unit changed from ${money(h.from)} to ${money(h.to)}.`, h.by);
       }
     }
-    if (rep.createdAt) push(rep.createdAt, "Sales Rep Added", `${rep.name || who} was added as a sales rep.`, "");
+    if (rep.createdAt) push(rep.createdAt, "Sales Agent Added", `${rep.name || who} was added as a Sales Agent.`, "");
   }
   out.sort((a, b) => b.ts - a.ts);
   return { ok: true, rows: out.slice(0, 200) };
@@ -516,7 +519,7 @@ export async function saveRepRow(p, { by = "" } = {}) {
   const target = type === "referred" ? String(p.child || "").trim() : repId;
   if (type === "referred") {
     const child = await SalesRep.findOne({ repId: target }, { referredBy: 1 }).lean();
-    if (!child || child.referredBy !== repId) return { ok: false, error: "That rep is not referred by this sales rep." };
+    if (!child || child.referredBy !== repId) return { ok: false, error: "That agent is not referred by this Sales Agent." };
   }
   if (rate !== undefined) {
     // check the rate first, so a refused rate saves nothing
@@ -558,15 +561,20 @@ export async function setReferrer(repId, referrerRepId, { by = "", note = "" } =
     }
   }
   const effectiveAt = new Date();
-  // a per-referral rate belonged to the old referrer - the new one starts on their own rate
-  const hadSponsorRate = rep.sponsorRate !== null && rep.sponsorRate !== undefined;
-  await SalesRep.updateOne({ repId }, { $set: { referredBy: to, ...(hadSponsorRate ? { sponsorRate: null } : {}) } });
+  // A newly added referral always starts at NEW_REFERRAL_RATE ($0.20 per
+  // unit, client 2026-11-18) as its own per-referral rate - whatever the
+  // saved default is. It can be changed later in the Edit popup. Removing the
+  // referrer clears the per-referral rate (there is nobody to pay it to).
+  const oldSponsor = rep.sponsorRate !== null && rep.sponsorRate !== undefined ? round2(rep.sponsorRate) : null;
+  const newSponsor = to ? NEW_REFERRAL_RATE : null;
+  await SalesRep.updateOne({ repId }, { $set: { referredBy: to, sponsorRate: newSponsor } });
   await CommissionChange.create({
     scope: "rep", repId, kind: "referrer", from, to, effectiveAt, by: String(by), note: String(note || ""),
   });
-  if (hadSponsorRate) {
+  if (oldSponsor !== newSponsor) {
     await CommissionChange.create({
-      scope: "rep", repId, kind: "sponsor", from: round2(rep.sponsorRate), to: null, effectiveAt, by: String(by), note: "Referrer changed",
+      scope: "rep", repId, kind: "sponsor", from: oldSponsor, to: newSponsor, effectiveAt, by: String(by),
+      note: to ? "Default for a new referral" : "Referrer removed",
     });
   }
   clearCaches();

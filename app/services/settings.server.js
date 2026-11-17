@@ -1,7 +1,18 @@
 import { connectDb } from "../db.server";
 import { Setting } from "../models/index.server";
 import * as M from "./message-defaults.server";
+import {
+  APPROVED_BODY_DEFAULT,
+  PREVIOUS as REP_SIGNUP_PREVIOUS,
+  REFERRER_APPROVED_BODY_DEFAULT,
+  REFERRER_REJECT_BODY_DEFAULT,
+  REJECT_BODY_DEFAULT,
+} from "./rep-signup-email-defaults.server";
+
 import { invalidateResponses } from "./response-cache.server";
+
+// re-exported for rep-signup.server.js
+export { APPROVED_BODY_DEFAULT, REFERRER_APPROVED_BODY_DEFAULT, REFERRER_REJECT_BODY_DEFAULT, REJECT_BODY_DEFAULT };
 
 /**
  * Every admin-editable setting, with its default. Replaces the "Settings"
@@ -9,14 +20,6 @@ import { invalidateResponses } from "./response-cache.server";
  * (Brevo keys, kill switches, commission rate, demo ids). Edited from
  * Shopify admin -> Rx Portal -> Settings; nothing here needs a redeploy.
  */
-export const REJECT_BODY_DEFAULT =
-  "<p>Hi [First Name],</p>" +
-  "<p>Thank you for your interest in becoming a sales representative with Protocol Therapeutics. " +
-  "After reviewing your application, we are unable to approve it at this time.</p>" +
-  "<p><b>Reason:</b> [Reason]</p>" +
-  "<p>If you have any questions, please contact us at [Contact Email].</p>" +
-  "<p>Protocol Therapeutics</p>";
-
 const LINK_NOTE =
   'HTML email body. Placeholders: [name] [link] [validity] [doctor_name]. [link] is used as the href of the "Click Here" button - the raw URL is never shown. [doctor_name] is the prescribing physician\'s name (already without a "Dr" prefix).';
 
@@ -86,9 +89,15 @@ export const SETTINGS_DEFAULTS = [
   ["REP_SIGNUP_TERMS", "", "The Terms & Conditions an applicant must read to the end and agree to in the sign-up popup. Plain text (line breaks are kept) or HTML - use Upload HTML file to load an .html file, then Save. Scripts in the HTML never run. Sign-up stays closed while this is empty. Each application keeps the exact text it was agreed against.", "repsignup"],
   ["REP_SIGNUP_NOTIFY_EMAIL", "", "Where new sales rep sign-ups are emailed for approval. Blank = SALES_EMAIL.", "repsignup"],
   ["REP_SIGNUP_BREVO_SYNC", "TRUE", "TRUE/FALSE - save every sales rep sign-up (all form fields, referrer, submitted / terms-accepted / reviewed timestamps, status, reject reason, Rep ID) on the applicant's Brevo contact. Missing contact attributes are created in Brevo automatically.", "repsignup"],
-  ["REP_SIGNUP_BREVO_LIST", "", "Optional Brevo list (id, or exact list name) every sales rep applicant is added to. Blank = attributes only.", "repsignup"],
-  ["REP_SIGNUP_REJECT_SUBJECT", "Update on Your Protocol Therapeutics Sales Rep Application", "Subject of the email sent to an applicant when their sign-up is rejected with \"Email the applicant\" ticked. Placeholders: [First Name] [Last Name] [Name] [Reason].", "repsignup"],
+  ["REP_SIGNUP_BREVO_LIST", "Referred Sales Agents", "Brevo list every Sales Agent sign-up is added to (with all form fields, timestamps and status on the contact). A list name or list id; a name that does not exist yet is created in Brevo automatically. NONE = no list. Sign-ups made before: run the \"brevo-rep-signups\" job once on Sync & logs.", "repsignup"],
+  ["REP_SIGNUP_APPROVED_SUBJECT", "Your Protocol Therapeutics Sales Agent Account Is Approved", "Approve & Create Login: subject of the email to the new Sales Agent. It replaces the welcome email (same login link). Placeholders: [First Name] [Last Name] [Name] [Email] [Link] [Referrer Name] [Contact Email].", "repsignup"],
+  ["REP_SIGNUP_APPROVED_BODY", APPROVED_BODY_DEFAULT, "Body of that email (HTML or plain text). [Link] = the login link to the Sales Agent dashboard (Settings -> WELCOME_EMAIL_LINK). If it cannot be sent, the normal welcome email goes out instead.", "repsignup"],
+  ["REP_SIGNUP_REFERRER_APPROVED_SUBJECT", "[Agent Name] Has Been Approved as a Sales Agent", "Approve & Create Login: subject of the email to the Sales Agent who referred them (only when they signed up through a referral link). Placeholders: [First Name] [Name] (the referrer), [Agent Name] [Agent First Name] [Contact Email] [Link] (their dashboard).", "repsignup"],
+  ["REP_SIGNUP_REFERRER_APPROVED_BODY", REFERRER_APPROVED_BODY_DEFAULT, "Body of that email (HTML or plain text). Same placeholders.", "repsignup"],
+  ["REP_SIGNUP_REJECT_SUBJECT", "Update on Your Protocol Therapeutics Sales Agent Application", "Reject (with \"Send rejection emails\" ticked): subject of the email to the applicant. Placeholders: [First Name] [Last Name] [Name] [Reason].", "repsignup"],
   ["REP_SIGNUP_REJECT_BODY", REJECT_BODY_DEFAULT, "Body of that email (HTML or plain text). Placeholders: [First Name] [Last Name] [Name] [Email] [Reason] [Contact Email] (= REP_SIGNUP_NOTIFY_EMAIL, else SALES_EMAIL).", "repsignup"],
+  ["REP_SIGNUP_REFERRER_REJECT_SUBJECT", "Update on Your Referral: [Agent Name]", "Reject (with \"Send rejection emails\" ticked): subject of the email to the Sales Agent who referred the applicant. Placeholders: [First Name] [Name] (the referrer), [Agent Name] [Agent First Name] [Reason] [Contact Email].", "repsignup"],
+  ["REP_SIGNUP_REFERRER_REJECT_BODY", REFERRER_REJECT_BODY_DEFAULT, "Body of that email (HTML or plain text). Same placeholders.", "repsignup"],
   // --- product copies
   ["PRODUCT_SYNC_DELETE_ORPHANS", "FALSE", "TRUE = when a practice's last portal account is removed, delete that practice's product copies (after it has been missing on two sync runs). FALSE = only report them on the Products page.", "products"],
   ["LOCATION_ID", "", "Shopify inventory location id used for shared inventory. Blank = the store's primary location. Changing it re-stocks every copy at the new location from the master list.", "products"],
@@ -106,6 +115,13 @@ export const SECRET_KEYS = new Set(
   SETTINGS_DEFAULTS.filter((r) => r[4]).map((r) => r[0]),
 );
 
+/* A saved value that is still one of a key's EARLIER built-in defaults was
+   never edited - it gets today's default. An edited value is never touched. */
+function isOldDefault(key, value) {
+  const olds = [].concat(M.OLD_DEFAULTS[key] ?? [], REP_SIGNUP_PREVIOUS[key] ?? []);
+  return olds.includes(value);
+}
+
 let cache = null;
 let cacheAt = 0;
 const TTL = 30_000;
@@ -120,7 +136,7 @@ export async function getSettings({ fresh = false } = {}) {
   for (const r of rows) {
     const v = String(r.value ?? "");
     // a template still holding the app's old wording was never edited -> new default
-    cfg[r.key] = M.OLD_DEFAULTS[r.key] === v ? DEFAULT_MAP[r.key] : v;
+    cfg[r.key] = isOldDefault(r.key, v) ? DEFAULT_MAP[r.key] : v;
   }
   cfg.enabled = isTrue(cfg.REMINDERS_ENABLED);
   cfg.r1 = Number(cfg.REMINDER_1_HOURS) || 0;

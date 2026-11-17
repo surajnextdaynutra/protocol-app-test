@@ -383,6 +383,7 @@ const repApplicationSchema = new Schema(
     address: { type: String, default: "" }, // street
     city: { type: String, default: "" },
     zip: { type: String, default: "" },
+    whyJoin: { type: String, default: "" }, // "Why I want to be a Sales Agent for Protocol Therapeutics" (max 500)
     agreed: { type: Boolean, default: false },
     signatureName: { type: String, default: "" },
     signedAt: { type: Date, default: null },
@@ -390,6 +391,8 @@ const repApplicationSchema = new Schema(
     termsText: { type: String, default: "" },
     signedHtml: { type: String, default: "" }, // the agreement filled in with their details + signature
     ip: { type: String, default: "" },
+    // the raw address headers the request arrived with (proxy check)
+    ipHeaders: { type: Schema.Types.Mixed, default: null },
     userAgent: { type: String, default: "" },
     repId: { type: String, default: "" }, // set on approval
     customerId: { type: String, default: "" },
@@ -400,6 +403,9 @@ const repApplicationSchema = new Schema(
     rejectEmailError: { type: String, default: "" },
     brevoSyncedAt: { type: Date, default: null }, // last time the application reached Brevo
     brevoError: { type: String, default: "" },
+    // every approve / reject email: { kind, to, ok, error, at }
+    //   kind: approved | referrer-approved | rejected | referrer-rejected
+    emails: { type: [Schema.Types.Mixed], default: [] },
   },
   { timestamps: true },
 );

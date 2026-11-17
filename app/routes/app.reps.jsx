@@ -29,7 +29,7 @@ import {
   setRepRate,
 } from "../services/rep-rates.server";
 import { TermsFrame } from "../components/terms-frame";
-import { applicationTerms, approveApplication, rejectApplication } from "../services/rep-signup.server";
+import { applicationTerms, approveApplication, rejectApplication, resendFailedDecisionEmails } from "../services/rep-signup.server";
 import { invalidateResponses } from "../services/response-cache.server";
 import { getSettings } from "../services/settings.server";
 import { authenticate } from "../shopify.server";
@@ -123,11 +123,15 @@ export const action = async ({ request }) => {
 
   if (intent === "approve") {
     const res = await approveApplication(String(f.get("id") || ""), { by: BY });
-    return { ok: res.ok, message: res.ok ? res.message : res.error };
+    return { ok: res.ok && !res.warning, message: res.ok ? res.message : res.error };
   }
   if (intent === "reject") {
     const res = await rejectApplication(String(f.get("id") || ""), { by: BY, note: f.get("note"), notify: f.get("notify") === "true" });
     return { ok: res.ok && !res.warning, message: res.ok ? res.message : res.error };
+  }
+  if (intent === "resend") {
+    const res = await resendFailedDecisionEmails(String(f.get("id") || ""));
+    return { ok: res.ok && !res.warning, message: res.ok || res.warning ? res.message : res.error };
   }
   if (intent === "code") {
     const code = await ensureReferralCode(String(f.get("repId") || ""));
@@ -207,17 +211,37 @@ function DefaultsCard({ defaults, reps, busy }) {
   );
 }
 
+/** "emailed: a@x, b@y · not sent: c@z (why)" from an application's approve / reject emails. */
+/** The last attempt of each approve / reject email (a resend replaces a failed one). */
+function lastEmails(emails) {
+  const last = {};
+  for (const e of emails || []) last[e.kind] = e;
+  return Object.values(last);
+}
+/** A failed email that "Resend failed emails" can send again (not the new agent's approval email - the welcome email covers it). */
+function hasFailedEmail(emails) {
+  return lastEmails(emails).some((e) => !e.ok && e.kind !== "approved");
+}
+function emailsText(emails) {
+  const list = lastEmails(emails);
+  if (!list.length) return "";
+  const ok = list.filter((e) => e.ok).map((e) => e.to);
+  const bad = list.filter((e) => !e.ok).map((e) => `${e.to || "(no address)"} (${e.error})`);
+  return (ok.length ? ` · emailed: ${ok.join(", ")}` : "") + (bad.length ? ` · not sent: ${bad.join("; ")}` : "");
+}
+
 function SignupsCard({ pending, recent, signupOpen, busy }) {
   const [openTerms, setOpenTerms] = useState("");
   const [notes, setNotes] = useState({});
-  const [mailOff, setMailOff] = useState({}); // id -> true when "Email the applicant" is unticked
+  const [mailOff, setMailOff] = useState({}); // id -> true when "Send rejection emails" is unticked
   const approving = useBusy("approve");
   const rejecting = useBusy("reject");
+  const resending = useBusy("resend");
   return (
     <Card>
       <BlockStack gap="300">
         <InlineStack align="space-between" blockAlign="center">
-          <Text as="h2" variant="headingMd">Sales rep sign-ups</Text>
+          <Text as="h2" variant="headingMd">Sales Agents waiting for approval</Text>
           <Badge tone={signupOpen ? "success" : "attention"}>{signupOpen ? "Sign-up open" : "Sign-up closed"}</Badge>
         </InlineStack>
         {!signupOpen ? (
@@ -238,6 +262,12 @@ function SignupsCard({ pending, recent, signupOpen, busy }) {
                 {a.email} · {a.phone}{a.company ? ` · ${a.company}` : ""}{a.address ? ` · ${a.address}` : a.state ? ` · ${a.state}` : ""}
               </Text>
               <Text as="p">Referred by: <b>{a.referrerRepId ? `${a.referrerName} (${a.referrerRepId})` : "no referral link"}</b></Text>
+              {a.whyJoin ? (
+                <Box background="bg-surface-secondary" padding="200" borderRadius="200">
+                  <Text as="p" variant="bodySm" tone="subdued">Why they want to be a Sales Agent:</Text>
+                  <Text as="p"><span style={{ whiteSpace: "pre-wrap" }}>{a.whyJoin}</span></Text>
+                </Box>
+              ) : null}
               {a.signedAt ? (
                 <Text as="p" tone="subdued" variant="bodySm">
                   Agreed to the terms on {dateTime(a.signedAt)} UTC · terms version {a.termsVersion}{a.ip ? ` · IP ${a.ip}` : ""}
@@ -268,15 +298,15 @@ function SignupsCard({ pending, recent, signupOpen, busy }) {
                   <input type="hidden" name="notify" value={mailOff[a.id] ? "false" : "true"} />
                   <InlineStack gap="200" blockAlign="end">
                     <TextField
-                      label={mailOff[a.id] ? "Reason (optional)" : "Reason (emailed to the applicant)"}
+                      label={mailOff[a.id] ? "Reason (optional)" : "Reason (included in the rejection emails)"}
                       labelHidden
-                      placeholder={mailOff[a.id] ? "Reason (optional)" : "Reason - emailed to the applicant"}
+                      placeholder={mailOff[a.id] ? "Reason (optional)" : "Reason - included in the rejection emails"}
                       name="note"
                       value={notes[a.id] || ""}
                       onChange={(v) => setNotes((s) => ({ ...s, [a.id]: v }))}
                       autoComplete="off"
                     />
-                    <Checkbox label="Email the applicant" checked={!mailOff[a.id]}
+                    <Checkbox label={a.referrerRepId ? "Email the applicant and the referring agent" : "Email the applicant"} checked={!mailOff[a.id]}
                       onChange={(on) => setMailOff((s) => ({ ...s, [a.id]: !on }))} />
                     <Button submit tone="critical" loading={rejecting}
                       disabled={(busy && !rejecting) || (!mailOff[a.id] && !String(notes[a.id] || "").trim())}>Reject</Button>
@@ -288,17 +318,21 @@ function SignupsCard({ pending, recent, signupOpen, busy }) {
         ))}
         {recent.length ? (
           <DataTable
-            columnContentTypes={["text", "text", "text", "text", "text"]}
-            headings={["Reviewed", "Name", "Referred by", "Status", "Rep ID"]}
+            columnContentTypes={["text", "text", "text", "text", "text", "text"]}
+            headings={["Reviewed", "Name", "Referred by", "Status", "Rep ID", ""]}
             rows={recent.map((a) => [
               dateTime(a.reviewedAt || a.ts),
               a.name,
               a.referrerName || "-",
-              a.status + (a.reviewNote ? ` (${a.reviewNote})` : "") +
-                (a.status === "Rejected"
-                  ? a.rejectEmailSentAt ? " · emailed" : a.rejectEmailError ? ` · email failed: ${a.rejectEmailError}` : ""
-                  : ""),
+              a.status + (a.reviewNote ? ` (${a.reviewNote})` : "") + emailsText(a.emails),
               a.repId || "-",
+              hasFailedEmail(a.emails) ? (
+                <Form method="post" key={a.id}>
+                  <input type="hidden" name="intent" value="resend" />
+                  <input type="hidden" name="id" value={a.id} />
+                  <Button submit size="slim" loading={resending} disabled={busy && !resending}>Resend failed emails</Button>
+                </Form>
+              ) : "",
             ])}
           />
         ) : null}
@@ -478,7 +512,8 @@ function RepCard({ rep, reps, practiceNames, defaults, signupBase, busy, isNew }
                 helpText={v.directRate === "" ? `Blank = default (${money(defaults.direct)})` : "This rep's own rate"} />
               <TextField label="Referral rate ($ per unit)" name="referralRate" value={v.referralRate} onChange={set("referralRate")} prefix="$"
                 placeholder={defaults.referral.toFixed(2)} autoComplete="off"
-                helpText={v.referralRate === "" ? `Blank = default (${money(defaults.referral)})` : "This rep's own rate"} />
+                helpText={(v.referralRate === "" ? `Blank = default (${money(defaults.referral)})` : "This rep's own rate") +
+                  ". Each new referral starts at its own $0.20 (change it in the Finance dashboard → Sales Agents → Edit)."} />
               <Select label="Referred by" name="referredBy" value={v.referredBy} onChange={set("referredBy")}
                 options={[{ label: "Nobody", value: "" },
                   ...reps.filter((r) => r.repId !== rep.repId).map((r) => ({ label: `${r.name || r.repId} (${r.repId})`, value: r.repId }))]}
