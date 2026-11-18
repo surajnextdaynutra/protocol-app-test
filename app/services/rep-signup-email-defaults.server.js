@@ -265,7 +265,10 @@ export const PREVIOUS = {
   REP_SIGNUP_BREVO_LIST: "",
   REP_SIGNUP_APPROVED_SUBJECT: "Your Protocol Therapeutics Sales Agent Account Is Approved",
   REP_SIGNUP_REFERRER_APPROVED_SUBJECT: "[Agent Name] Has Been Approved as a Sales Agent",
-  REP_SIGNUP_REJECT_SUBJECT: "Update on Your Protocol Therapeutics Sales Agent Application",
+  REP_SIGNUP_REJECT_SUBJECT: [
+    "Update on Your Protocol Therapeutics Sales Agent Application",
+    "Update on Your Protocol Therapeutics Sales Rep Application",
+  ],
   REP_SIGNUP_REFERRER_REJECT_SUBJECT: "Update on Your Referral: [Agent Name]",
   REP_SIGNUP_APPROVED_BODY: [
     V2.REP_SIGNUP_APPROVED_BODY,
