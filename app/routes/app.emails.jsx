@@ -23,6 +23,7 @@ import {
 import { ActionResult, roleLabel, useBusy } from "../components/admin";
 import { WELCOME_DASHBOARDS, welcomeLinkForRole } from "../components/welcome-link";
 import {
+  MESSAGE_GROUPS,
   listMessages,
   resetMessage,
   saveMessage,
@@ -46,6 +47,7 @@ export const loader = async ({ request }) => {
   const [messages, cfg] = await Promise.all([listMessages(), getSettings({ fresh: true })]);
   return {
     tab: url.searchParams.get("tab") || messages[0].id,
+    groups: MESSAGE_GROUPS,
     messages: messages.map((m) =>
       m.id === "welcome" ? { ...m, defaultSubject: WELCOME_DEFAULT_SUBJECT, defaultBody: WELCOME_DEFAULT_BODY } : m,
     ),
@@ -147,7 +149,7 @@ function SendingRules({ m, post, busy }) {
   return (
     <Card>
       <BlockStack gap="300">
-        <Text as="h2" variant="headingSm">When it's sent</Text>
+        <Text as="h2" variant="headingSm">{m.settingsTitle || "When it's sent"}</Text>
         {m.settings.map((s) =>
           s.type === "bool" ? (
             <Checkbox key={s.key} label={s.label} checked={String(v[s.key]).toUpperCase() === "TRUE"}
@@ -360,11 +362,36 @@ export default function Emails() {
   const actionData = useActionData();
   const submit = useSubmit();
   const busy = useBusy();
-  const start = Math.max(0, data.messages.findIndex((m) => m.id === data.tab));
-  const [selected, setSelected] = useState(start);
-  const m = data.messages[selected];
+  // two levels: a category (Accounts / Protocols / Orders / Sales Agents), then its messages
+  const groups = data.groups.filter(([g]) => data.messages.some((x) => x.group === g));
+  const first = data.messages.find((x) => x.id === data.tab) || data.messages[0];
+  const [groupId, setGroupId] = useState(first.group);
+  const [messageId, setMessageId] = useState(first.id);
+  const inGroup = data.messages.filter((x) => x.group === groupId);
+  const m = inGroup.find((x) => x.id === messageId) || inGroup[0];
+  const remember = (id) => {
+    // ?tab= keeps the open message across a reload / shared link (no data reload)
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.set("tab", id);
+      window.history.replaceState(window.history.state, "", u.toString());
+    } catch { /* ignore */ }
+  };
+  const pickGroup = (i) => {
+    const g = groups[i][0];
+    const firstOf = data.messages.find((x) => x.group === g);
+    setGroupId(g);
+    setMessageId(firstOf.id);
+    remember(firstOf.id);
+  };
+  const pickMessage = (i) => { setMessageId(inGroup[i].id); remember(inGroup[i].id); };
 
-  const tabs = data.messages.map((x) => ({
+  const groupTabs = groups.map(([g, label]) => ({
+    id: "group-" + g,
+    content: `${label} (${data.messages.filter((x) => x.group === g).length})`,
+    accessibilityLabel: label,
+  }));
+  const tabs = inGroup.map((x) => ({
     id: x.id,
     content: x.enabled === false ? `${x.label} (off)` : x.label,
     accessibilityLabel: x.label,
@@ -380,7 +407,10 @@ export default function Emails() {
       <BlockStack gap="400">
         <ActionResult data={actionData} />
         <Card padding="0">
-          <Tabs tabs={tabs} selected={selected} onSelect={setSelected} fitted={false} />
+          <Tabs tabs={groupTabs} selected={Math.max(0, groups.findIndex(([g]) => g === groupId))} onSelect={pickGroup} fitted={false} />
+          <Box borderBlockStartWidth="025" borderColor="border" background="bg-surface-secondary">
+            <Tabs tabs={tabs} selected={Math.max(0, inGroup.findIndex((x) => x.id === m.id))} onSelect={pickMessage} fitted={false} />
+          </Box>
         </Card>
         {/* keyed per tab so each tab's editor starts from its own saved text */}
         <MessageEditor key={m.id} m={m} data={data} post={post} busy={busy} />

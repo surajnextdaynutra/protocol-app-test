@@ -32,7 +32,7 @@ export default function App() {
         <Link to="/app/payouts">Payouts</Link>
         <Link to="/app/accounts">Accounts</Link>
         <Link to="/app/emails">Emails</Link>
-        <Link to="/app/reps">Sales reps</Link>
+        <Link to="/app/reps">Sales Agents</Link>
         <Link to="/app/products">Products</Link>
         <Link to="/app/banking">Banking details</Link>
         <Link to="/app/forms">Form entries</Link>

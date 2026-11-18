@@ -1,7 +1,9 @@
 import { connectDb } from "../db.server";
 import { Setting } from "../models/index.server";
 import { fillTemplate, sendEmail, sendSms } from "./brevo.server";
+import { welcomeLinkForRole } from "../components/welcome-link";
 import { getWelcomeTemplate, saveWelcomeTemplate, sendWelcomeEmail } from "./provisioning.server";
+import { sendTemplated } from "./rep-signup.server";
 import { READ_ONLY } from "./shopify-admin.server";
 import { SETTINGS_DEFAULTS, getSettings, isTrue, setSettings } from "./settings.server";
 
@@ -25,7 +27,7 @@ const RX = [
 
 export const MESSAGES = [
   {
-    id: "welcome", label: "Welcome email", kind: "email",
+    id: "welcome", group: "accounts", label: "Welcome email", kind: "email",
     subjectKey: "WELCOME_EMAIL_SUBJECT", bodyKey: "WELCOME_EMAIL_BODY",
     when: "Sent to a new practice, clinic, physician or sales rep created on the Accounts page with “Send welcome email” ticked.",
     looseMatch: true, // [First Name] == [first name] - see sendWelcomeEmail
@@ -36,18 +38,18 @@ export const MESSAGES = [
     ],
   },
   {
-    id: "protocol-email", label: "Protocol email", kind: "email",
+    id: "protocol-email", group: "protocols", label: "Protocol email", kind: "email",
     subjectKey: "CONFIRMED_SUBJECT", bodyKey: "CONFIRMED_BODY", templateIdKey: "CONFIRMED_TEMPLATE_ID",
     when: "Sent to the patient when a physician sends a protocol by email (Prescription builder → Send).",
     placeholders: RX,
   },
   {
-    id: "protocol-sms", label: "Protocol SMS", kind: "sms", bodyKey: "SMS_BODY",
+    id: "protocol-sms", group: "protocols", label: "Protocol SMS", kind: "sms", bodyKey: "SMS_BODY",
     when: "Sent with the protocol email when the physician ticks “Also send by SMS”. [link] is shortened.",
     placeholders: RX,
   },
   {
-    id: "not-opened", label: "Reminder: not opened", kind: "email",
+    id: "not-opened", group: "protocols", label: "Reminder: not opened", kind: "email",
     subjectKey: "NOT_OPENED_SUBJECT", bodyKey: "NOT_OPENED_BODY", templateIdKey: "NOT_OPENED_TEMPLATE_ID",
     when: "Sent when the patient hasn't opened the protocol link - a first and a second reminder.",
     placeholders: RX,
@@ -58,7 +60,7 @@ export const MESSAGES = [
     ],
   },
   {
-    id: "abandoned", label: "Reminder: abandoned cart", kind: "email",
+    id: "abandoned", group: "protocols", label: "Reminder: abandoned cart", kind: "email",
     subjectKey: "ABANDONED_SUBJECT", bodyKey: "ABANDONED_BODY", templateIdKey: "ABANDONED_TEMPLATE_ID",
     when: "Sent when the patient opened the link or started checkout but didn't buy.",
     placeholders: RX,
@@ -68,7 +70,7 @@ export const MESSAGES = [
     ],
   },
   {
-    id: "abandoned-sms", label: "Abandoned cart SMS", kind: "sms",
+    id: "abandoned-sms", group: "protocols", label: "Abandoned cart SMS", kind: "sms",
     bodyKey: "ABANDONED_SMS_BODY", enabledKey: "ABANDONED_SMS_ENABLED",
     when: "Sent with the abandoned-cart reminder email when the prescription has a phone number.",
     placeholders: [
@@ -79,7 +81,7 @@ export const MESSAGES = [
     ],
   },
   {
-    id: "expiry", label: "Reminder: expiring", kind: "email",
+    id: "expiry", group: "protocols", label: "Reminder: expiring", kind: "email",
     subjectKey: "EXPIRY_SUBJECT", bodyKey: "EXPIRY_BODY", templateIdKey: "EXPIRY_TEMPLATE_ID",
     when: "Sent shortly before the protocol link expires, if it still hasn't been bought.",
     placeholders: RX,
@@ -89,7 +91,7 @@ export const MESSAGES = [
     ],
   },
   {
-    id: "order-confirm-email", label: "Order confirmation email", kind: "email",
+    id: "order-confirm-email", group: "orders", label: "Order confirmation email", kind: "email",
     subjectKey: "ORDER_CONFIRM_SUBJECT", bodyKey: "ORDER_CONFIRM_BODY", enabledKey: "ORDER_CONFIRM_EMAIL_ENABLED",
     when: "Sent once to the customer of every paid Shopify order: products with their images, totals and the shipping address. Shopify's own order confirmation email is separate - see Shopify admin → Settings → Notifications.",
     // shown as the placeholder itself in the preview / test - no sample order data
@@ -101,7 +103,7 @@ export const MESSAGES = [
     ],
   },
   {
-    id: "order-paid-sms", label: "Order confirmation SMS", kind: "sms",
+    id: "order-paid-sms", group: "orders", label: "Order confirmation SMS", kind: "sms",
     bodyKey: "ORDER_PAID_BODY", enabledKey: "ORDER_PAID_SMS_ENABLED",
     when: "Sent once to the customer of every paid Shopify order with a phone number.",
     placeholders: [
@@ -114,7 +116,7 @@ export const MESSAGES = [
     ],
   },
   {
-    id: "order-shipped-sms", label: "Order shipped SMS", kind: "sms",
+    id: "order-shipped-sms", group: "orders", label: "Order shipped SMS", kind: "sms",
     bodyKey: "ORDER_FULFILLED_BODY", enabledKey: "ORDER_FULFILLED_SMS_ENABLED",
     when: "Sent once when an order is fulfilled and has a tracking link.",
     placeholders: [
@@ -123,7 +125,7 @@ export const MESSAGES = [
     ],
   },
   {
-    id: "order-updated-sms", label: "Order updated SMS", kind: "sms",
+    id: "order-updated-sms", group: "orders", label: "Order updated SMS", kind: "sms",
     bodyKey: "ORDER_UPDATED_BODY", enabledKey: "ORDER_UPDATED_SMS_ENABLED",
     when: "Sent when an order's phone, email or shipping address is changed.",
     placeholders: [
@@ -132,11 +134,83 @@ export const MESSAGES = [
       { token: "Order Update Summary", sample: "Shipping address updated." },
     ],
   },
+  ...SALES_AGENT_MESSAGES(),
 ];
+
+/* Sales Agent sign-up decisions (Sales Agents page -> Approvals). Sent by
+   rep-signup.server.js (decisionEmailSpec) with these same keys. A sample of
+   "cfg:LINK" / "cfg:CONTACT" is read from Settings when the page loads, so
+   the preview shows the real login link / contact address. */
+function SALES_AGENT_MESSAGES() {
+  const contact = {
+    key: "REP_SIGNUP_NOTIFY_EMAIL", label: "Contact email", type: "text",
+    help: "Shown as [Contact Email] in these emails, and where new sign-ups are emailed for approval. Blank = SALES_EMAIL.",
+  };
+  const applicant = [
+    { token: "First Name", sample: "Jane" }, { token: "Last Name", sample: "Smith" },
+    { token: "Name", sample: "Jane Smith" }, { token: "Email", sample: "jane.smith@example.com" },
+  ];
+  const referrer = [
+    { token: "First Name", sample: "John", note: "the referring agent" },
+    { token: "Name", sample: "John Carter", note: "the referring agent" },
+    { token: "Agent Name", sample: "Jane Smith", note: "the new / rejected agent" },
+    { token: "Agent First Name", sample: "Jane" },
+  ];
+  const contactToken = { token: "Contact Email", sample: "cfg:CONTACT", note: "the Contact email below (else SALES_EMAIL)" };
+  const linkToken = { token: "Link", sample: "cfg:LINK", note: "Sales Agent login link (Welcome email tab)" };
+  const reasonToken = { token: "Reason", sample: "(the reason typed when rejecting)", note: "the Reason box is left out when no reason is given" };
+  const common = { group: "agents", kind: "email", settings: [contact], settingsTitle: "Contact address", sender: "rep-decision" };
+  return [
+    {
+      ...common, id: "agent-approved", label: "Approved: new agent",
+      subjectKey: "REP_SIGNUP_APPROVED_SUBJECT", bodyKey: "REP_SIGNUP_APPROVED_BODY",
+      when: "Sent to the new Sales Agent when you approve their sign-up (Sales Agents → Approvals). It replaces the welcome email; if it can't be sent, the normal welcome email goes out instead.",
+      placeholders: [...applicant, linkToken, { token: "Referrer Name", sample: "John Carter" }, contactToken],
+    },
+    {
+      ...common, id: "agent-approved-referrer", label: "Approved: referrer",
+      subjectKey: "REP_SIGNUP_REFERRER_APPROVED_SUBJECT", bodyKey: "REP_SIGNUP_REFERRER_APPROVED_BODY",
+      when: "Sent to the Sales Agent who referred them, when the new agent signed up through a referral link.",
+      placeholders: [...referrer, linkToken, contactToken],
+    },
+    {
+      ...common, id: "agent-rejected", label: "Rejected: applicant",
+      subjectKey: "REP_SIGNUP_REJECT_SUBJECT", bodyKey: "REP_SIGNUP_REJECT_BODY",
+      when: "Sent to the applicant when you reject their sign-up with the emails ticked.",
+      placeholders: [...applicant, reasonToken, contactToken],
+    },
+    {
+      ...common, id: "agent-rejected-referrer", label: "Rejected: referrer",
+      subjectKey: "REP_SIGNUP_REFERRER_REJECT_SUBJECT", bodyKey: "REP_SIGNUP_REFERRER_REJECT_BODY",
+      when: "Sent to the Sales Agent who referred the applicant, when you reject with the emails ticked.",
+      placeholders: [...referrer, reasonToken, contactToken],
+    },
+  ];
+}
+
+/** Message categories, in the order the Emails page shows them. */
+export const MESSAGE_GROUPS = [
+  ["accounts", "Accounts"],
+  ["protocols", "Protocols & reminders"],
+  ["orders", "Orders"],
+  ["agents", "Sales Agents"],
+];
+
+/** Every Settings key a message owns - the Settings page leaves these to the Emails page. */
+export const MESSAGE_SETTING_KEYS = new Set(
+  MESSAGES.flatMap((m) => [m.subjectKey, m.bodyKey, m.templateIdKey, m.enabledKey, ...(m.settings || []).map((x) => x.key)]).filter(Boolean),
+);
 
 const DEFAULTS = Object.fromEntries(SETTINGS_DEFAULTS.map(([k, v]) => [k, v]));
 const byId = (id) => MESSAGES.find((m) => m.id === id);
-const sampleValues = (m) => Object.fromEntries(m.placeholders.map((p) => [p.token, p.sample]));
+/** "cfg:LINK" / "cfg:CONTACT" samples -> the real values from Settings. */
+function liveSample(sample, cfg) {
+  if (sample === "cfg:LINK") return welcomeLinkForRole(cfg.WELCOME_EMAIL_LINK, "Sales Rep");
+  if (sample === "cfg:CONTACT") return String(cfg.REP_SIGNUP_NOTIFY_EMAIL || cfg.SALES_EMAIL || "").trim();
+  return sample;
+}
+const withLiveSamples = (m, cfg) => m.placeholders.map((p) => ({ ...p, sample: liveSample(p.sample, cfg) }));
+const sampleValues = (m, cfg = {}) => Object.fromEntries(withLiveSamples(m, cfg).map((p) => [p.token, p.sample]));
 
 /** Everything the Emails page shows, per message. */
 export async function listMessages() {
@@ -152,6 +226,7 @@ export async function listMessages() {
     const defaultBody = DEFAULTS[m.bodyKey] || "";
     return {
       ...m,
+      placeholders: withLiveSamples(m, cfg),
       subject,
       body,
       // welcome's defaults live in welcome-default.server (its settings default to blank)
@@ -230,7 +305,7 @@ export async function sendTestMessage(id, to, role) {
     if (READ_ONLY) return { ok: false, message: "Not sent - read-only mode (RX_READ_ONLY)." };
     if (isTrue(cfg.SMS_DISABLED)) return { ok: false, message: "Not sent - SMS_DISABLED is on in Settings." };
     if (!cfg.BREVO_API_KEY) return { ok: false, message: "Not sent - set BREVO_API_KEY in Settings." };
-    const ok = await sendSms(digits, fillTemplate(cfg[m.bodyKey], sampleValues(m)));
+    const ok = await sendSms(digits, fillTemplate(cfg[m.bodyKey], sampleValues(m, cfg)));
     return ok
       ? { ok: true, message: `Test SMS sent to +${digits}.` }
       : { ok: false, message: "Brevo didn't accept the SMS - see Sync & logs for the reason." };
@@ -243,7 +318,14 @@ export async function sendTestMessage(id, to, role) {
       ? { ok: true, message: `Test welcome email (${role || "Physician"}) sent to ${to}.` }
       : { ok: false, message: "Test not sent - " + result };
   }
-  const values = sampleValues(m);
+  const values = sampleValues(m, cfg);
+  if (m.sender === "rep-decision") {
+    await sendTemplated(cfg, {
+      to, subjectKey: m.subjectKey, bodyKey: m.bodyKey, values, subjectPrefix: "[Test] ",
+      subjectFallback: DEFAULTS[m.subjectKey] || "", bodyFallback: DEFAULTS[m.bodyKey] || "",
+    });
+    return { ok: true, message: `Test “${m.label}” sent to ${to}.` };
+  }
   await sendEmail({
     to,
     subject: "[Test] " + fillTemplate(cfg[m.subjectKey], values),

@@ -4,6 +4,7 @@ import { BlockStack, Button, Card, FormLayout, InlineStack, Page, Text, TextFiel
 
 import { ActionResult, useBusy } from "../components/admin";
 import { TermsFrame } from "../components/terms-frame";
+import { MESSAGE_SETTING_KEYS } from "../services/message-templates.server";
 import { listCounters, setCounter } from "../services/provisioning.server";
 import { DEFAULT_RATE_KEYS, setDefaultRate } from "../services/rep-rates.server";
 import { listSettings, setSetting } from "../services/settings.server";
@@ -19,17 +20,19 @@ const GROUPS = [
   ["brevo", "Brevo"],
   ["forms", "Website forms"],
   ["commission", "Commission"],
-  ["repsignup", "Sales rep sign-up"],
+  ["repsignup", "Sales Agent sign-up"],
   ["products", "Product copies"],
   ["demo", "Demo accounts"],
 ];
-// Email / SMS wording, the welcome email and reminder timing are edited on the
-// Emails page (one tab per message) - not listed here, so not edited twice.
+// Email / SMS wording, the welcome email, reminder timing and the Sales Agent
+// approve / reject emails are edited on the Emails page (one tab per message) -
+// not listed here, so not edited twice.
 const ON_EMAILS_PAGE = new Set(["reminders", "email", "sms", "welcome"]);
 
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
-  const rows = await listSettings();
+  // keys a message on the Emails page owns are edited there, not here
+  const rows = (await listSettings()).filter((r) => !MESSAGE_SETTING_KEYS.has(r.key));
   return {
     // a stored secret is never sent back to the browser
     settings: rows.map((r) => (r.secret ? { ...r, value: "", hasValue: !!r.value } : r)),
@@ -164,8 +167,9 @@ export default function Settings() {
             <BlockStack gap="100">
               <Text as="h2" variant="headingMd">Emails &amp; SMS</Text>
               <Text as="p" tone="subdued">
-                Prescription emails, reminders and their timing, SMS messages and the welcome email are edited on the
-                Emails page - one tab per message, with a preview and a test send.
+                Protocol emails, reminders and their timing, SMS messages, the welcome email and the Sales Agent
+                approve / reject emails are edited on the Emails page - one tab per message, with a preview and a test
+                send.
               </Text>
             </BlockStack>
             <Button url="/app/emails">Open Emails</Button>

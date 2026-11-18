@@ -406,8 +406,9 @@ export async function applicationTerms(id) {
    kept on the application (`emails`) and shown to the admin; a failed email
    never undoes the decision. */
 
-/** Fills a Settings template and sends it. A paragraph / line holding [Reason] is dropped when there is no reason. */
-async function sendTemplated(cfg, { to, subjectKey, bodyKey, subjectFallback, bodyFallback, values }) {
+/** Fills a Settings template and sends it. A paragraph / line holding [Reason] is dropped when there is no reason.
+ *  Also used by the Emails page's "Send test" (subjectPrefix "[Test] "). */
+export async function sendTemplated(cfg, { to, subjectKey, bodyKey, subjectFallback, bodyFallback, values, subjectPrefix = "" }) {
   const reason = values.Reason || "";
   const htmlValues = { ...values, Reason: escHtml(reason).replace(/\r?\n/g, "<br>") };
   let body = String(cfg[bodyKey] || "").trim() || bodyFallback;
@@ -419,7 +420,7 @@ async function sendTemplated(cfg, { to, subjectKey, bodyKey, subjectFallback, bo
   }
   if (!/<[a-z][\s\S]*>/i.test(body)) body = body.split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
   const subject = fillTemplate(String(cfg[subjectKey] || "").trim() || subjectFallback, values);
-  await sendEmail({ to, subject, htmlBody: fillTemplate(body, htmlValues) });
+  await sendEmail({ to, subject: subjectPrefix + subject, htmlBody: fillTemplate(body, htmlValues) });
 }
 
 /** The referring Sales Agent of an application: { repId, name, firstName, email } or null. */

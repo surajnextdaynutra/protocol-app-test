@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Form, useActionData, useLoaderData } from "@remix-run/react";
 import {
   Badge,
+  Banner,
   BlockStack,
   Box,
   Button,
@@ -10,9 +11,11 @@ import {
   DataTable,
   FormLayout,
   InlineStack,
-  Layout,
+  InlineGrid,
   Page,
+  Pagination,
   Select,
+  Tabs,
   Text,
   TextField,
 } from "@shopify/polaris";
@@ -29,7 +32,13 @@ import {
   setRepRate,
 } from "../services/rep-rates.server";
 import { TermsFrame } from "../components/terms-frame";
-import { applicationTerms, approveApplication, rejectApplication, resendFailedDecisionEmails } from "../services/rep-signup.server";
+import {
+  applicationTerms,
+  approveApplication,
+  listApplications,
+  rejectApplication,
+  resendFailedDecisionEmails,
+} from "../services/rep-signup.server";
 import { invalidateResponses } from "../services/response-cache.server";
 import { getSettings } from "../services/settings.server";
 import { authenticate } from "../shopify.server";
@@ -47,7 +56,7 @@ const BY = "Shopify admin (Sales reps)";
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
   await connectDb();
-  const [overview, docs, owed, practices, cfg] = await Promise.all([
+  const [overview, docs, owed, practices, cfg, allApps] = await Promise.all([
     commissionsOverview(),
     SalesRep.find({}).sort({ name: 1 }).lean(),
     MonthlyPayout.aggregate([
@@ -56,6 +65,7 @@ export const loader = async ({ request }) => {
     ]),
     Account.find({ practiceId: { $ne: "" } }, { practiceId: 1, company: 1, first: 1, last: 1, doctorId: 1, clinicId: 1 }).lean(),
     getSettings(),
+    listApplications({ limit: 500 }),
   ]);
   const totals = {};
   for (const o of owed) totals[o._id] = { paid: o.paid, pending: Math.max(0, o.amount - o.paid) };
@@ -77,12 +87,14 @@ export const loader = async ({ request }) => {
   }
   const stats = Object.fromEntries(overview.reps.map((r) => [r.repId, r]));
   return {
+    tab: new URL(request.url).searchParams.get("tab") || "",
     defaults: overview.defaults,
     history: overview.history,
     tree: overview.tree,
     profit: overview.profit,
     pending,
-    recent: overview.applications.recent.filter((a) => a.status !== "Pending").slice(0, 15),
+    // every reviewed sign-up (newest first) - the Approvals tab pages through them
+    recent: allApps.filter((a) => a.status !== "Pending"),
     practiceNames,
     signupBase: `${origin}/pages/rep-signup?ref=`,
     signupOpen: String(cfg.REP_SIGNUP_ENABLED).toUpperCase() === "TRUE" && !!String(cfg.REP_SIGNUP_TERMS || "").trim(),
@@ -189,7 +201,7 @@ function DefaultsCard({ defaults, reps, busy }) {
       <Form method="post">
         <input type="hidden" name="intent" value="defaults" />
         <FormLayout>
-          <Text as="h2" variant="headingMd">Default sales commission</Text>
+          <Text as="h2" variant="headingMd">Default commission for all Sales Agents</Text>
           <Text as="p" tone="subdued">
             A change applies to orders placed from the moment you save; earlier orders keep their rate. Reps on the
             default see the change on their dashboard.
@@ -230,101 +242,191 @@ function emailsText(emails) {
   return (ok.length ? ` · emailed: ${ok.join(", ")}` : "") + (bad.length ? ` · not sent: ${bad.join("; ")}` : "");
 }
 
-function SignupsCard({ pending, recent, signupOpen, busy }) {
-  const [openTerms, setOpenTerms] = useState("");
-  const [notes, setNotes] = useState({});
-  const [mailOff, setMailOff] = useState({}); // id -> true when "Send rejection emails" is unticked
-  const approving = useBusy("approve");
-  const rejecting = useBusy("reject");
+/** Client-side paging for one list on this page: { slice, pager, reset }. Same look as the
+ *  shared <Pager> (components/admin), which pages through the URL - this page holds several
+ *  lists at once, so each keeps its own page in state. `pager` is null when one page is enough. */
+function usePaged(items, size) {
+  const [page, setPage] = useState(0);
+  const pages = Math.max(1, Math.ceil(items.length / size));
+  const p = Math.min(page, pages - 1); // the list can shrink (e.g. after an approval)
+  const slice = items.slice(p * size, p * size + size);
+  const pager =
+    items.length > size ? (
+      <InlineStack align="end" blockAlign="center" gap="300">
+        <Text as="span" tone="subdued" variant="bodySm">
+          {items.length.toLocaleString()} total · page {p + 1} of {pages}
+        </Text>
+        <Pagination hasPrevious={p > 0} onPrevious={() => setPage(p - 1)} hasNext={p < pages - 1} onNext={() => setPage(p + 1)} />
+      </InlineStack>
+    ) : null;
+  return { slice, pager, reset: () => setPage(0) };
+}
+
+/** One sign-up waiting for approval: details, signed Agreement, Approve / Reject. */
+function PendingSignup({ a, busy }) {
+  const [showTerms, setShowTerms] = useState(false);
+  const [note, setNote] = useState("");
+  const [mail, setMail] = useState(true); // "Email the applicant (and the referring agent)"
+  const approving = useBusy((fd) => fd.get("intent") === "approve" && fd.get("id") === a.id);
+  const rejecting = useBusy((fd) => fd.get("intent") === "reject" && fd.get("id") === a.id);
+  return (
+    <Box padding="400" borderWidth="025" borderColor="border" borderRadius="200">
+      <BlockStack gap="300">
+        <InlineStack align="space-between" blockAlign="start" gap="200">
+          <BlockStack gap="100">
+            <Text as="h3" variant="headingSm">{a.name}</Text>
+            <Text as="p" tone="subdued">
+              {a.email} · {a.phone}{a.company ? ` · ${a.company}` : ""}{a.address ? ` · ${a.address}` : a.state ? ` · ${a.state}` : ""}
+            </Text>
+          </BlockStack>
+          <BlockStack gap="100" inlineAlign="end">
+            <Badge tone="attention">Waiting for approval</Badge>
+            <Text as="span" tone="subdued" variant="bodySm">Signed up {dateTime(a.ts)}</Text>
+          </BlockStack>
+        </InlineStack>
+        <Text as="p">
+          Referred by: <b>{a.referrerRepId ? `${a.referrerName} (${a.referrerRepId})` : "no referral link"}</b>
+        </Text>
+        {a.whyJoin ? (
+          <Box background="bg-surface-secondary" padding="300" borderRadius="200">
+            <BlockStack gap="100">
+              <Text as="p" variant="bodySm" tone="subdued">Why they want to be a Sales Agent</Text>
+              <Text as="p"><span style={{ whiteSpace: "pre-wrap" }}>{a.whyJoin}</span></Text>
+            </BlockStack>
+          </Box>
+        ) : null}
+        {a.signedAt ? (
+          <Text as="p" tone="subdued" variant="bodySm">
+            Agreed to the Agreement on {dateTime(a.signedAt)} UTC · Agreement version {a.termsVersion}{a.ip ? ` · IP ${a.ip}` : ""}
+            {a.brevoSyncedAt ? " · saved to Brevo" : a.brevoError ? ` · Brevo: ${a.brevoError}` : ""}
+          </Text>
+        ) : a.ip ? (
+          <Text as="p" tone="subdued" variant="bodySm">IP {a.ip}</Text>
+        ) : null}
+        {a.terms ? (
+          <InlineStack>
+            <Button size="slim" variant="plain" onClick={() => setShowTerms((x) => !x)}>
+              {showTerms ? "Hide signed Agreement" : "View signed Agreement"}
+            </Button>
+          </InlineStack>
+        ) : null}
+        {showTerms && a.terms ? <TermsFrame terms={a.terms} height={340} title={`Agreement signed by ${a.name}`} /> : null}
+
+        <Box borderBlockStartWidth="025" borderColor="border" paddingBlockStart="300">
+          <InlineGrid columns={{ xs: 1, md: ["oneThird", "twoThirds"] }} gap="400">
+            <BlockStack gap="200">
+              <Text as="h4" variant="headingXs">Approve</Text>
+              <Text as="p" tone="subdued" variant="bodySm">
+                Creates their login on the default rates and sends the approval email
+                {a.referrerRepId ? " (and tells the referring agent)" : ""}.
+              </Text>
+              <Form method="post">
+                <input type="hidden" name="intent" value="approve" />
+                <input type="hidden" name="id" value={a.id} />
+                <Button submit variant="primary" loading={approving} disabled={busy && !approving}>Approve &amp; create login</Button>
+              </Form>
+            </BlockStack>
+            <Form method="post">
+              <input type="hidden" name="intent" value="reject" />
+              <input type="hidden" name="id" value={a.id} />
+              <input type="hidden" name="notify" value={mail ? "true" : "false"} />
+              <BlockStack gap="200">
+                <Text as="h4" variant="headingXs">Reject</Text>
+                <TextField
+                  label="Reason"
+                  name="note"
+                  value={note}
+                  onChange={setNote}
+                  autoComplete="off"
+                  multiline={2}
+                  placeholder={mail ? "Included in the rejection emails" : "Optional - only kept on the sign-up"}
+                />
+                <InlineStack align="space-between" blockAlign="center" gap="200">
+                  <Checkbox
+                    label={a.referrerRepId ? "Email the applicant and the referring agent" : "Email the applicant"}
+                    checked={mail}
+                    onChange={setMail}
+                  />
+                  <Button submit tone="critical" loading={rejecting} disabled={(busy && !rejecting) || (mail && !note.trim())}>
+                    Reject
+                  </Button>
+                </InlineStack>
+                {mail && !note.trim() ? (
+                  <Text as="p" tone="subdued" variant="bodySm">Type a reason to reject with emails, or untick the box.</Text>
+                ) : null}
+              </BlockStack>
+            </Form>
+          </InlineGrid>
+        </Box>
+      </BlockStack>
+    </Box>
+  );
+}
+
+function PendingSignups({ pending, signupOpen, busy }) {
+  const { slice, pager } = usePaged(pending, 5);
+  return (
+    <Card>
+      <BlockStack gap="400">
+        <InlineStack align="space-between" blockAlign="center" gap="200">
+          <BlockStack gap="050">
+            <Text as="h2" variant="headingMd">Sales Agents waiting for approval</Text>
+            <Text as="p" tone="subdued">{pending.length ? `${pending.length} sign-up(s) to review, newest first.` : "Nothing to review."}</Text>
+          </BlockStack>
+          <Badge tone={signupOpen ? "success" : "attention"}>{signupOpen ? "Sign-up open" : "Sign-up closed"}</Badge>
+        </InlineStack>
+        {!signupOpen ? (
+          <Banner tone="warning">
+            <p>
+              Sign-up opens when Settings → Sales Agent sign-up has REP_SIGNUP_ENABLED = TRUE and the Agreement text in
+              REP_SIGNUP_TERMS.
+            </p>
+          </Banner>
+        ) : null}
+        {!pending.length ? (
+          <Box padding="600">
+            <Text as="p" alignment="center" tone="subdued">No sign-ups waiting for approval.</Text>
+          </Box>
+        ) : null}
+        {slice.map((a) => <PendingSignup key={a.id} a={a} busy={busy} />)}
+        {pager}
+      </BlockStack>
+    </Card>
+  );
+}
+
+const STATUS_TONE = { Approved: "success", Rejected: "critical", Approving: "info" };
+
+function ReviewedSignups({ recent, busy }) {
+  const [status, setStatus] = useState("");
+  const rows = useMemo(() => recent.filter((a) => !status || a.status === status), [recent, status]);
+  const { slice, pager, reset } = usePaged(rows, 10);
   const resending = useBusy("resend");
   return (
     <Card>
       <BlockStack gap="300">
-        <InlineStack align="space-between" blockAlign="center">
-          <Text as="h2" variant="headingMd">Sales Agents waiting for approval</Text>
-          <Badge tone={signupOpen ? "success" : "attention"}>{signupOpen ? "Sign-up open" : "Sign-up closed"}</Badge>
+        <InlineStack align="space-between" blockAlign="center" gap="200">
+          <Text as="h2" variant="headingMd">Reviewed sign-ups</Text>
+          <div style={{ minWidth: 200 }}>
+            <Select label="Show" labelHidden value={status} onChange={(v) => { setStatus(v); reset(); }}
+              options={[{ label: "All reviewed", value: "" }, { label: "Approved", value: "Approved" }, { label: "Rejected", value: "Rejected" }]} />
+          </div>
         </InlineStack>
-        {!signupOpen ? (
-          <Text as="p" tone="subdued">
-            Sign-up opens when Settings → Sales rep sign-up has REP_SIGNUP_ENABLED = TRUE and the Agreement
-            text in REP_SIGNUP_TERMS.
-          </Text>
-        ) : null}
-        {!pending.length ? <Text as="p" tone="subdued">No sign-ups waiting for approval.</Text> : null}
-        {pending.map((a) => (
-          <Box key={a.id} padding="300" borderWidth="025" borderColor="border" borderRadius="200">
-            <BlockStack gap="200">
-              <InlineStack align="space-between" blockAlign="center">
-                <Text as="h3" variant="headingSm">{a.name}</Text>
-                <Text as="span" tone="subdued" variant="bodySm">{dateTime(a.ts)}</Text>
-              </InlineStack>
-              <Text as="p">
-                {a.email} · {a.phone}{a.company ? ` · ${a.company}` : ""}{a.address ? ` · ${a.address}` : a.state ? ` · ${a.state}` : ""}
-              </Text>
-              <Text as="p">Referred by: <b>{a.referrerRepId ? `${a.referrerName} (${a.referrerRepId})` : "no referral link"}</b></Text>
-              {a.whyJoin ? (
-                <Box background="bg-surface-secondary" padding="200" borderRadius="200">
-                  <Text as="p" variant="bodySm" tone="subdued">Why they want to be a Sales Agent:</Text>
-                  <Text as="p"><span style={{ whiteSpace: "pre-wrap" }}>{a.whyJoin}</span></Text>
-                </Box>
-              ) : null}
-              {a.signedAt ? (
-                <Text as="p" tone="subdued" variant="bodySm">
-                  Agreed to the Agreement on {dateTime(a.signedAt)} UTC · Agreement version {a.termsVersion}{a.ip ? ` · IP ${a.ip}` : ""}
-                  {a.brevoSyncedAt ? " · saved to Brevo" : a.brevoError ? ` · Brevo: ${a.brevoError}` : ""}
-                </Text>
-              ) : a.ip ? (
-                <Text as="p" tone="subdued" variant="bodySm">IP {a.ip}</Text>
-              ) : null}
-              {a.terms ? (
-                <InlineStack gap="200">
-                  <Button size="slim" onClick={() => setOpenTerms(openTerms === a.id ? "" : a.id)}>
-                    {openTerms === a.id ? "Hide signed Agreement" : "View signed Agreement"}
-                  </Button>
-                </InlineStack>
-              ) : null}
-              {openTerms === a.id && a.terms ? (
-                <TermsFrame terms={a.terms} height={340} title={`Agreement signed by ${a.name}`} />
-              ) : null}
-              <InlineStack gap="200" blockAlign="end">
-                <Form method="post">
-                  <input type="hidden" name="intent" value="approve" />
-                  <input type="hidden" name="id" value={a.id} />
-                  <Button submit variant="primary" loading={approving} disabled={busy && !approving}>Approve &amp; create login</Button>
-                </Form>
-                <Form method="post">
-                  <input type="hidden" name="intent" value="reject" />
-                  <input type="hidden" name="id" value={a.id} />
-                  <input type="hidden" name="notify" value={mailOff[a.id] ? "false" : "true"} />
-                  <InlineStack gap="200" blockAlign="end">
-                    <TextField
-                      label={mailOff[a.id] ? "Reason (optional)" : "Reason (included in the rejection emails)"}
-                      labelHidden
-                      placeholder={mailOff[a.id] ? "Reason (optional)" : "Reason - included in the rejection emails"}
-                      name="note"
-                      value={notes[a.id] || ""}
-                      onChange={(v) => setNotes((s) => ({ ...s, [a.id]: v }))}
-                      autoComplete="off"
-                    />
-                    <Checkbox label={a.referrerRepId ? "Email the applicant and the referring agent" : "Email the applicant"} checked={!mailOff[a.id]}
-                      onChange={(on) => setMailOff((s) => ({ ...s, [a.id]: !on }))} />
-                    <Button submit tone="critical" loading={rejecting}
-                      disabled={(busy && !rejecting) || (!mailOff[a.id] && !String(notes[a.id] || "").trim())}>Reject</Button>
-                  </InlineStack>
-                </Form>
-              </InlineStack>
-            </BlockStack>
-          </Box>
-        ))}
-        {recent.length ? (
+        {!rows.length ? <Text as="p" tone="subdued">No reviewed sign-ups yet.</Text> : (
           <DataTable
             columnContentTypes={["text", "text", "text", "text", "text", "text"]}
             headings={["Reviewed", "Name", "Referred by", "Status", "Rep ID", ""]}
-            rows={recent.map((a) => [
+            rows={slice.map((a) => [
               dateTime(a.reviewedAt || a.ts),
               a.name,
               a.referrerName || "-",
-              a.status + (a.reviewNote ? ` (${a.reviewNote})` : "") + emailsText(a.emails),
+              <BlockStack key={a.id} gap="100">
+                <InlineStack><Badge tone={STATUS_TONE[a.status]}>{a.status}</Badge></InlineStack>
+                {a.reviewNote ? <Text as="span" variant="bodySm" tone="subdued">Reason: {a.reviewNote}</Text> : null}
+                {emailsText(a.emails) ? (
+                  <Text as="span" variant="bodySm" tone="subdued" breakWord>{emailsText(a.emails).replace(/^ · /, "")}</Text>
+                ) : null}
+              </BlockStack>,
               a.repId || "-",
               hasFailedEmail(a.emails) ? (
                 <Form method="post" key={a.id}>
@@ -335,7 +437,8 @@ function SignupsCard({ pending, recent, signupOpen, busy }) {
               ) : "",
             ])}
           />
-        ) : null}
+        )}
+        {pager}
       </BlockStack>
     </Card>
   );
@@ -425,13 +528,14 @@ function HistoryCard({ history, reps }) {
     () => history.filter((h) => !rep || (rep === "_default" ? h.scope === "default" : h.repId === rep)),
     [history, rep],
   );
+  const { slice, pager, reset } = usePaged(rows, 15);
   return (
     <Card>
       <BlockStack gap="300">
         <InlineStack align="space-between" blockAlign="center">
           <Text as="h2" variant="headingMd">Commission change history</Text>
           <div style={{ minWidth: 220 }}>
-            <Select label="Show" labelHidden value={rep} onChange={setRep}
+            <Select label="Show" labelHidden value={rep} onChange={(v) => { setRep(v); reset(); }}
               options={[{ label: "All changes", value: "" }, { label: "Default rates only", value: "_default" },
                 ...reps.map((r) => ({ label: `${r.name || r.repId} (${r.repId})`, value: r.repId }))]} />
           </div>
@@ -440,7 +544,7 @@ function HistoryCard({ history, reps }) {
           <DataTable
             columnContentTypes={["text", "text", "text", "text", "text", "text", "text"]}
             headings={["Effective", "Applies to", "Change", "From", "To", "By", "Note"]}
-            rows={rows.slice(0, 200).map((h) => [
+            rows={slice.map((h) => [
               dateTime(h.ts),
               h.scope === "default" ? `Default (${h.notified} rep(s) notified)` : `${h.repName} (${h.repId})`,
               KIND_LABEL[h.kind] || h.kind,
@@ -451,6 +555,7 @@ function HistoryCard({ history, reps }) {
             ])}
           />
         )}
+        {pager}
       </BlockStack>
     </Card>
   );
@@ -477,7 +582,7 @@ function RepCard({ rep, reps, practiceNames, defaults, signupBase, busy, isNew }
           <input type="hidden" name="_card" value={card} />
           <FormLayout>
             <InlineStack align="space-between" blockAlign="center">
-              <Text as="h2" variant="headingMd">{isNew ? "Add a sales rep" : `${v.name || v.repId}`}</Text>
+              <Text as="h2" variant="headingMd">{isNew ? "Add a Sales Agent" : `${v.name || v.repId}`}</Text>
               {!isNew ? (
                 <Text as="span" tone="subdued" variant="bodySm">
                   Paid {money(rep.paid)} · Pending {money(rep.pending)}
@@ -548,43 +653,149 @@ function RepCard({ rep, reps, practiceNames, defaults, signupBase, busy, isNew }
   );
 }
 
+/** A small number card in the summary row above the tabs. */
+function Stat({ label, value, sub, action }) {
+  return (
+    <Card>
+      <BlockStack gap="100">
+        <Text as="p" variant="bodySm" tone="subdued">{label}</Text>
+        <Text as="p" variant="headingLg">{value}</Text>
+        {sub ? <Text as="p" variant="bodySm" tone="subdued">{sub}</Text> : null}
+        {action}
+      </BlockStack>
+    </Card>
+  );
+}
+
+const NEW_REP = {
+  repId: "", name: "", email: "", notes: "", active: true, assigned: "", referredBy: "", referralCode: "",
+  directRate: "", referralRate: "", paid: 0, pending: 0, stats: null,
+};
+
+/** Sales Agents tab: search, filter and page through the agent cards; add a new agent. */
+function AgentsList({ reps, practiceNames, defaults, signupBase, busy }) {
+  const [q, setQ] = useState("");
+  const [status, setStatus] = useState("");
+  const [adding, setAdding] = useState(false);
+  const rows = useMemo(() => {
+    const term = q.trim().toLowerCase();
+    return reps.filter((r) => {
+      if (status === "active" && !r.active) return false;
+      if (status === "inactive" && r.active) return false;
+      if (status === "own" && r.directRate === "" && r.referralRate === "") return false;
+      return !term || `${r.name} ${r.repId} ${r.email}`.toLowerCase().includes(term);
+    });
+  }, [reps, q, status]);
+  const { slice, pager, reset } = usePaged(rows, 10);
+  return (
+    <BlockStack gap="400">
+      <Card>
+        <BlockStack gap="200">
+          <InlineStack gap="300" blockAlign="end" wrap>
+            <div style={{ flex: "1 1 260px" }}>
+              <TextField label="Search" labelHidden placeholder="Search by name, Rep ID or email" value={q} autoComplete="off"
+                onChange={(v) => { setQ(v); reset(); }} clearButton onClearButtonClick={() => { setQ(""); reset(); }} />
+            </div>
+            <div style={{ minWidth: 190 }}>
+              <Select label="Show" labelHidden value={status} onChange={(v) => { setStatus(v); reset(); }}
+                options={[
+                  { label: "All Sales Agents", value: "" },
+                  { label: "Active", value: "active" },
+                  { label: "Inactive", value: "inactive" },
+                  { label: "On their own rates", value: "own" },
+                ]} />
+            </div>
+            <Button variant={adding ? "secondary" : "primary"} onClick={() => setAdding((x) => !x)}>
+              {adding ? "Cancel new agent" : "Add Sales Agent"}
+            </Button>
+          </InlineStack>
+          <Text as="p" variant="bodySm" tone="subdued">
+            Showing {rows.length} of {reps.length} Sales Agent(s). Blank rates = the defaults on the Commission tab.
+          </Text>
+        </BlockStack>
+      </Card>
+      {adding ? (
+        <RepCard isNew rep={NEW_REP} reps={reps} practiceNames={practiceNames} defaults={defaults} signupBase={signupBase} busy={busy} />
+      ) : null}
+      {!rows.length ? (
+        <Card>
+          <Box padding="400">
+            <Text as="p" alignment="center" tone="subdued">No Sales Agents match this search.</Text>
+          </Box>
+        </Card>
+      ) : null}
+      {slice.map((r) => (
+        <RepCard key={r.repId + ":" + r.directRate + ":" + r.referralRate + ":" + r.referredBy} rep={r} reps={reps}
+          practiceNames={practiceNames} defaults={defaults} signupBase={signupBase} busy={busy} />
+      ))}
+      {pager}
+    </BlockStack>
+  );
+}
+
+const TAB_IDS = ["commission", "approvals", "agents", "tree", "profit"];
+
 export default function Reps() {
   const data = useLoaderData();
   const actionData = useActionData();
   const busy = useBusy();
-  const { reps, practiceNames, defaults } = data;
+  const { reps, practiceNames, defaults, pending } = data;
+  const [tab, setTab] = useState(TAB_IDS.includes(data.tab) ? data.tab : "commission");
+  const open = (id) => {
+    setTab(id);
+    // ?tab= keeps the open tab across a reload / shared link (no data reload)
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.set("tab", id);
+      window.history.replaceState(window.history.state, "", u.toString());
+    } catch { /* ignore */ }
+  };
+  const active = reps.filter((r) => r.active).length;
+  const tabs = [
+    { id: "commission", content: "Commission" },
+    { id: "approvals", content: pending.length ? `Approvals (${pending.length})` : "Approvals" },
+    { id: "agents", content: `Sales Agents (${reps.length})` },
+    { id: "tree", content: "Referral tree" },
+    { id: "profit", content: "PT Profit" },
+  ];
+
   return (
-    <Page
-      title="Sales reps"
-      subtitle={`Default ${money(defaults.direct)} per unit direct, ${money(defaults.referral)} per unit to the referring rep. Each rep can have their own rates.`}
-    >
+    <Page title="Sales Agents" subtitle="Commission for every agent, sign-up approvals, each agent's rates and practices, referrals and PT Profit.">
       <BlockStack gap="400">
         <ActionResult data={actionData} />
-        <Layout>
-          <Layout.Section variant="oneHalf">
+        <InlineGrid columns={{ xs: 2, md: 4 }} gap="300">
+          <Stat label="Default direct commission" value={`${money(defaults.direct)} / unit`}
+            sub={`${reps.filter((r) => r.active && r.directRate === "").length} active agent(s) on it`} />
+          <Stat label="Default referral commission" value={`${money(defaults.referral)} / unit`}
+            sub={`${reps.filter((r) => r.active && r.referralRate === "").length} active agent(s) on it`} />
+          <Stat label="Active Sales Agents" value={`${active}`} sub={`${reps.length - active} inactive`} />
+          <Stat label="Waiting for approval" value={`${pending.length}`}
+            sub={data.signupOpen ? "Sign-up is open" : "Sign-up is closed"}
+            action={pending.length && tab !== "approvals" ? (
+              <InlineStack><Button size="slim" onClick={() => open("approvals")}>Review now</Button></InlineStack>
+            ) : null} />
+        </InlineGrid>
+        <Card padding="0">
+          <Tabs tabs={tabs} selected={Math.max(0, TAB_IDS.indexOf(tab))} onSelect={(i) => open(TAB_IDS[i])} fitted={false} />
+        </Card>
+
+        {tab === "commission" ? (
+          <BlockStack gap="400">
             <DefaultsCard defaults={defaults} reps={reps} busy={busy} />
-          </Layout.Section>
-          <Layout.Section variant="oneHalf">
-            <SignupsCard pending={data.pending} recent={data.recent} signupOpen={data.signupOpen} busy={busy} />
-          </Layout.Section>
-        </Layout>
-        <TreeCard tree={data.tree} />
-        {reps.map((r) => (
-          <RepCard key={r.repId + ":" + r.directRate + ":" + r.referralRate + ":" + r.referredBy} rep={r} reps={reps}
-            practiceNames={practiceNames} defaults={defaults} signupBase={data.signupBase} busy={busy} />
-        ))}
-        <RepCard
-          isNew
-          rep={{ repId: "", name: "", email: "", notes: "", active: true, assigned: "", referredBy: "", referralCode: "",
-            directRate: "", referralRate: "", paid: 0, pending: 0, stats: null }}
-          reps={reps}
-          practiceNames={practiceNames}
-          defaults={defaults}
-          signupBase={data.signupBase}
-          busy={busy}
-        />
-        <HistoryCard history={data.history} reps={reps} />
-        <ProfitCard profit={data.profit} />
+            <HistoryCard history={data.history} reps={reps} />
+          </BlockStack>
+        ) : null}
+        {tab === "approvals" ? (
+          <BlockStack gap="400">
+            <PendingSignups pending={pending} signupOpen={data.signupOpen} busy={busy} />
+            <ReviewedSignups recent={data.recent} busy={busy} />
+          </BlockStack>
+        ) : null}
+        {tab === "agents" ? (
+          <AgentsList reps={reps} practiceNames={practiceNames} defaults={defaults} signupBase={data.signupBase} busy={busy} />
+        ) : null}
+        {tab === "tree" ? <TreeCard tree={data.tree} /> : null}
+        {tab === "profit" ? <ProfitCard profit={data.profit} /> : null}
       </BlockStack>
     </Page>
   );
