@@ -10,11 +10,15 @@ import { repByReferralCode, setReferrer } from "./rep-rates.server";
 import { invalidateResponses } from "./response-cache.server";
 import {
   APPROVED_BODY_DEFAULT,
+  APPROVED_SUBJECT_DEFAULT,
   getSettings,
   isTrue,
   REFERRER_APPROVED_BODY_DEFAULT,
+  REFERRER_APPROVED_SUBJECT_DEFAULT,
   REFERRER_REJECT_BODY_DEFAULT,
+  REFERRER_REJECT_SUBJECT_DEFAULT,
   REJECT_BODY_DEFAULT,
+  REJECT_SUBJECT_DEFAULT,
 } from "./settings.server";
 
 /* Sales rep sign-up through a referral link (/pages/rep-signup?ref=CODE).
@@ -231,10 +235,10 @@ export async function submitSignup(p, request) {
   // no typed signature any more: agreeing + submitting under their own name is the acceptance
   v.signatureName = `${v.firstName} ${v.lastName}`.trim();
   const agreed = p.agree === true || String(p.agree) === "true";
-  if (!agreed) fields.agree = "You must agree to the Terms & Conditions to sign up.";
+  if (!agreed) fields.agree = "You must agree to the Agreement to sign up.";
   if (Object.keys(fields).length) return { ok: false, fields, error: "Please fix the highlighted fields." };
   if (String(p.termsVersion || "") !== version) {
-    return { ok: false, termsChanged: true, error: "The Terms & Conditions were updated while you were signing. Please read them again and re-sign." };
+    return { ok: false, termsChanged: true, error: "The Agreement was updated while you were signing. Please read it again and re-sign." };
   }
 
   await connectDb();
@@ -479,7 +483,7 @@ function decisionEmailSpec(app, kind, cfg, referrer) {
         to: app.email,
         args: {
           subjectKey: "REP_SIGNUP_APPROVED_SUBJECT", bodyKey: "REP_SIGNUP_APPROVED_BODY",
-          subjectFallback: "Your Protocol Therapeutics Sales Agent Account Is Approved", bodyFallback: APPROVED_BODY_DEFAULT,
+          subjectFallback: APPROVED_SUBJECT_DEFAULT, bodyFallback: APPROVED_BODY_DEFAULT,
           values: { ...applicant, Link: link, "Referrer Name": referrer?.name || "" },
         },
       };
@@ -488,7 +492,7 @@ function decisionEmailSpec(app, kind, cfg, referrer) {
         to: referrer.email,
         args: {
           subjectKey: "REP_SIGNUP_REFERRER_APPROVED_SUBJECT", bodyKey: "REP_SIGNUP_REFERRER_APPROVED_BODY",
-          subjectFallback: "[Agent Name] Has Been Approved as a Sales Agent", bodyFallback: REFERRER_APPROVED_BODY_DEFAULT,
+          subjectFallback: REFERRER_APPROVED_SUBJECT_DEFAULT, bodyFallback: REFERRER_APPROVED_BODY_DEFAULT,
           values: { ...aboutAgent, Link: link },
         },
       };
@@ -506,7 +510,7 @@ function decisionEmailSpec(app, kind, cfg, referrer) {
         to: referrer.email,
         args: {
           subjectKey: "REP_SIGNUP_REFERRER_REJECT_SUBJECT", bodyKey: "REP_SIGNUP_REFERRER_REJECT_BODY",
-          subjectFallback: "Update on Your Referral: [Agent Name]", bodyFallback: REFERRER_REJECT_BODY_DEFAULT,
+          subjectFallback: REFERRER_REJECT_SUBJECT_DEFAULT, bodyFallback: REFERRER_REJECT_BODY_DEFAULT,
           values: { ...aboutAgent, Reason: reason },
         },
       };
@@ -666,4 +670,3 @@ export async function resendFailedDecisionEmails(id) {
   return { ok: allOk, warning: !allOk, message: `Resent - ${emailSummary(results)}.` };
 }
 
-const REJECT_SUBJECT_DEFAULT = "Update on Your Protocol Therapeutics Sales Agent Application";

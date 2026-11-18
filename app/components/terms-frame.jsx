@@ -1,4 +1,4 @@
-/* Sales rep Terms & Conditions (Settings -> REP_SIGNUP_TERMS) can be plain
+/* Sales rep Agreement (Settings -> REP_SIGNUP_TERMS) can be plain
    text or HTML (pasted, or uploaded from an .html file). They are always shown
    inside a sandboxed iframe: the file keeps its own formatting, but no script
    in it can run and nothing in it can reach the page around it. The same
@@ -33,7 +33,7 @@ export function termsDoc(text) {
   return `<!doctype html><html><head><meta charset="utf-8">${BASE_STYLE}</head><body>${t}</body></html>`;
 }
 
-export function TermsFrame({ terms, height = 320, title = "Terms & Conditions" }) {
+export function TermsFrame({ terms, height = 320, title = "Agreement" }) {
   return (
     <iframe
       title={title}

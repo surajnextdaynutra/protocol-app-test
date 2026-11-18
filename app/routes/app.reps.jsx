@@ -246,7 +246,7 @@ function SignupsCard({ pending, recent, signupOpen, busy }) {
         </InlineStack>
         {!signupOpen ? (
           <Text as="p" tone="subdued">
-            Sign-up opens when Settings → Sales rep sign-up has REP_SIGNUP_ENABLED = TRUE and the Terms &amp; Conditions
+            Sign-up opens when Settings → Sales rep sign-up has REP_SIGNUP_ENABLED = TRUE and the Agreement
             text in REP_SIGNUP_TERMS.
           </Text>
         ) : null}
@@ -270,7 +270,7 @@ function SignupsCard({ pending, recent, signupOpen, busy }) {
               ) : null}
               {a.signedAt ? (
                 <Text as="p" tone="subdued" variant="bodySm">
-                  Agreed to the terms on {dateTime(a.signedAt)} UTC · terms version {a.termsVersion}{a.ip ? ` · IP ${a.ip}` : ""}
+                  Agreed to the Agreement on {dateTime(a.signedAt)} UTC · Agreement version {a.termsVersion}{a.ip ? ` · IP ${a.ip}` : ""}
                   {a.brevoSyncedAt ? " · saved to Brevo" : a.brevoError ? ` · Brevo: ${a.brevoError}` : ""}
                 </Text>
               ) : a.ip ? (
@@ -279,12 +279,12 @@ function SignupsCard({ pending, recent, signupOpen, busy }) {
               {a.terms ? (
                 <InlineStack gap="200">
                   <Button size="slim" onClick={() => setOpenTerms(openTerms === a.id ? "" : a.id)}>
-                    {openTerms === a.id ? "Hide signed terms" : "View signed terms"}
+                    {openTerms === a.id ? "Hide signed Agreement" : "View signed Agreement"}
                   </Button>
                 </InlineStack>
               ) : null}
               {openTerms === a.id && a.terms ? (
-                <TermsFrame terms={a.terms} height={340} title={`Terms signed by ${a.name}`} />
+                <TermsFrame terms={a.terms} height={340} title={`Agreement signed by ${a.name}`} />
               ) : null}
               <InlineStack gap="200" blockAlign="end">
                 <Form method="post">

@@ -51,12 +51,13 @@ const REASON = `
  * One email in the house layout.
  *   title      <title> + hidden preview text (preheader)
  *   greeting   "Hi <strong>…</strong>,"
+ *   salutation the whole opening line instead (e.g. "Hello,")
  *   message    the main paragraphs (HTML)
  *   reason     true = the Reason panel after the message
  *   cta        { label, href } button
  *   support    the line under the button
  */
-function layout({ title, preheader, greeting, message, reason = false, cta = null, support }) {
+function layout({ title, preheader, greeting, salutation, message, reason = false, cta = null, support }) {
   return `<!doctype html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
 <head>
@@ -106,7 +107,7 @@ function layout({ title, preheader, greeting, message, reason = false, cta = nul
           <!-- Greeting -->
           <tr>
             <td class="pt-pad" style="padding:10px 40px 0;${FONT}font-size:16px;line-height:26px;color:#333333;">
-              Hi <strong>${greeting}</strong>,
+              ${salutation || `Hi <strong>${greeting}</strong>,`}
             </td>
           </tr>
 
@@ -151,83 +152,147 @@ ${reason ? REASON : ""}${cta ? button(cta.label, cta.href) : ""}
 `;
 }
 
-const SUPPORT = 'If you have any questions, contact us at <a href="mailto:[Contact Email]" style="color:#1f2d3d;">[Contact Email]</a>.';
+const CONTACT = '<a href="mailto:[Contact Email]" style="color:#1f2d3d;">[Contact Email]</a>';
+const SUPPORT = `If you have any questions, contact us at ${CONTACT}.`;
+
+/* Subjects (Settings -> REP_SIGNUP_*_SUBJECT defaults). */
+export const APPROVED_SUBJECT_DEFAULT = "Welcome to the Protocol Therapeutics Sales Agent Program!";
+export const REFERRER_APPROVED_SUBJECT_DEFAULT = "Great News\u2014[Agent Name] Has Been Approved!";
+export const REJECT_SUBJECT_DEFAULT = "An Update on Your Protocol Therapeutics Sales Agent Application";
+export const REFERRER_REJECT_SUBJECT_DEFAULT = "An Update on Your Referral\u2014[Agent Name]";
 
 /** To the new Sales Agent on Approve - replaces the welcome email. */
 export const APPROVED_BODY_DEFAULT = layout({
-  title: "Your Sales Agent Account Is Approved",
-  preheader: "Your Protocol Therapeutics Sales Agent account is approved. Log in to get started.",
-  greeting: "[First Name] [Last Name]",
+  title: "Welcome to the Sales Agent Program",
+  preheader: "Your application to join the Protocol Therapeutics Sales Agent Program has been approved!",
+  greeting: "[First Name]",
   message:
-    "<strong>Welcome to Protocol Therapeutics.</strong><br /><br />" +
-    "Your application to become a Sales Agent has been approved, and your account is ready to use.<br /><br />" +
-    "Log in with <strong>[Email]</strong> to find your referral link and follow your sales and commissions.",
-  cta: { label: "Log In to Your Dashboard", href: "[Link]" },
-  support: SUPPORT,
+    "Great news\u2014your application to join the Protocol Therapeutics Sales Agent Program has been approved!<br /><br />" +
+    "Here is your link to create your login and access your Sales Agent account:",
+  cta: { label: "CREATE MY ACCOUNT", href: "[Link]" },
+  support: "We\u2019re excited to have you working with us and look forward to what we can accomplish together.",
 });
 
 /** To the referring Sales Agent on Approve. */
 export const REFERRER_APPROVED_BODY_DEFAULT = layout({
   title: "Your Referral Has Been Approved",
-  preheader: "[Agent Name] has been approved as a Protocol Therapeutics Sales Agent.",
-  greeting: "[First Name]",
+  preheader: "Great news! [Agent Name] has been approved to join the Protocol Therapeutics Sales Agent Program.",
+  salutation: "Hello,",
   message:
-    "<strong>Good news - [Agent Name] has been approved.</strong><br /><br />" +
-    "[Agent Name] signed up with your referral link and is now a Protocol Therapeutics Sales Agent.<br /><br />" +
-    "You will earn a referral commission on their sales. You can follow them on your Sales Agent dashboard.",
-  cta: { label: "View Your Dashboard", href: "[Link]" },
-  support: SUPPORT,
+    "Regarding your referral: <strong>[Agent Name]</strong><br /><br />" +
+    "Great news! [Agent First Name] has been approved to join the Protocol Therapeutics Sales Agent Program.<br /><br />" +
+    "We\u2019ll contact [Agent First Name] directly to let them know, and include instructions for creating their login and accessing their Sales Agent account.",
+  support: "Thank you for making the introduction and helping us grow the Protocol Therapeutics Sales Agent community!",
 });
 
 /** To the applicant on Reject (with "send emails" ticked). */
 export const REJECT_BODY_DEFAULT = layout({
-  title: "Update on Your Sales Agent Application",
+  title: "An Update on Your Sales Agent Application",
   preheader: "An update on your Protocol Therapeutics Sales Agent application.",
-  greeting: "[First Name] [Last Name]",
+  greeting: "[First Name]",
   message:
-    "Thank you for your interest in becoming a Sales Agent with Protocol Therapeutics.<br /><br />" +
-    "After reviewing your application, we are unable to approve it at this time.",
+    "Thank you for your interest in joining the Protocol Therapeutics Sales Agent Program and for taking the time to complete your application.<br /><br />" +
+    "After reviewing your application, we\u2019ve decided not to move forward at this time.",
   reason: true,
-  support: SUPPORT,
+  support: `We appreciate your interest in Protocol Therapeutics. If you have any questions, please feel free to contact us at ${CONTACT}.`,
 });
 
 /** To the referring Sales Agent on Reject (with "send emails" ticked). */
 export const REFERRER_REJECT_BODY_DEFAULT = layout({
-  title: "Update on Your Referral",
+  title: "An Update on Your Referral",
   preheader: "An update on your referral [Agent Name].",
-  greeting: "[First Name]",
+  salutation: "Hello,",
   message:
-    "Thank you for referring <strong>[Agent Name]</strong> to Protocol Therapeutics.<br /><br />" +
-    "After reviewing their application, we are unable to approve it at this time.",
+    "Regarding your referral: <strong>[Agent Name]</strong><br /><br />" +
+    "After reviewing [Agent First Name]\u2019s application, we\u2019ve decided not to move forward at this time.",
   reason: true,
-  support: SUPPORT,
+  support:
+    "Thank you for making the introduction and for your continued support of the Protocol Therapeutics Sales Agent Program.<br /><br />" +
+    `If you have any questions, please feel free to contact us at ${CONTACT}.`,
 });
 
-/* The plain versions these replaced (2026-11-18). Settings saved with them
-   untouched are switched to the templates above (settings.server.js,
-   OLD_DEFAULTS) - an edited template is never overwritten. */
+/* The branded versions of 2026-11-18, replaced 2026-11-19 by the wording above. */
+const V2 = {
+  REP_SIGNUP_APPROVED_BODY: layout({
+    title: "Your Sales Agent Account Is Approved",
+    preheader: "Your Protocol Therapeutics Sales Agent account is approved. Log in to get started.",
+    greeting: "[First Name] [Last Name]",
+    message:
+      "<strong>Welcome to Protocol Therapeutics.</strong><br /><br />" +
+      "Your application to become a Sales Agent has been approved, and your account is ready to use.<br /><br />" +
+      "Log in with <strong>[Email]</strong> to find your referral link and follow your sales and commissions.",
+    cta: { label: "Log In to Your Dashboard", href: "[Link]" },
+    support: SUPPORT,
+  }),
+  REP_SIGNUP_REFERRER_APPROVED_BODY: layout({
+    title: "Your Referral Has Been Approved",
+    preheader: "[Agent Name] has been approved as a Protocol Therapeutics Sales Agent.",
+    greeting: "[First Name]",
+    message:
+      "<strong>Good news - [Agent Name] has been approved.</strong><br /><br />" +
+      "[Agent Name] signed up with your referral link and is now a Protocol Therapeutics Sales Agent.<br /><br />" +
+      "You will earn a referral commission on their sales. You can follow them on your Sales Agent dashboard.",
+    cta: { label: "View Your Dashboard", href: "[Link]" },
+    support: SUPPORT,
+  }),
+  REP_SIGNUP_REJECT_BODY: layout({
+    title: "Update on Your Sales Agent Application",
+    preheader: "An update on your Protocol Therapeutics Sales Agent application.",
+    greeting: "[First Name] [Last Name]",
+    message:
+      "Thank you for your interest in becoming a Sales Agent with Protocol Therapeutics.<br /><br />" +
+      "After reviewing your application, we are unable to approve it at this time.",
+    reason: true,
+    support: SUPPORT,
+  }),
+  REP_SIGNUP_REFERRER_REJECT_BODY: layout({
+    title: "Update on Your Referral",
+    preheader: "An update on your referral [Agent Name].",
+    greeting: "[First Name]",
+    message:
+      "Thank you for referring <strong>[Agent Name]</strong> to Protocol Therapeutics.<br /><br />" +
+      "After reviewing their application, we are unable to approve it at this time.",
+    reason: true,
+    support: SUPPORT,
+  }),
+};
+
+/* Earlier built-in wording. Settings saved with one of these untouched are
+   switched to the templates above (settings.server.js, isOldDefault) - an
+   edited template is never overwritten. */
 export const PREVIOUS = {
   // the sign-up list was blank (= no list) until 2026-11-18; now "Referred Sales Agents"
   REP_SIGNUP_BREVO_LIST: "",
-  REP_SIGNUP_APPROVED_BODY:
+  REP_SIGNUP_APPROVED_SUBJECT: "Your Protocol Therapeutics Sales Agent Account Is Approved",
+  REP_SIGNUP_REFERRER_APPROVED_SUBJECT: "[Agent Name] Has Been Approved as a Sales Agent",
+  REP_SIGNUP_REJECT_SUBJECT: "Update on Your Protocol Therapeutics Sales Agent Application",
+  REP_SIGNUP_REFERRER_REJECT_SUBJECT: "Update on Your Referral: [Agent Name]",
+  REP_SIGNUP_APPROVED_BODY: [
+    V2.REP_SIGNUP_APPROVED_BODY,
     "<p>Hi [First Name],</p>" +
-    "<p>Great news - your application to become a Sales Agent with Protocol Therapeutics has been approved, and your account is ready.</p>" +
-    '<p><a href="[Link]" style="display:inline-block;background:#E0B156;color:#143056;font-weight:700;text-decoration:none;padding:12px 24px;border-radius:8px">Log In to Your Sales Agent Dashboard</a></p>' +
-    "<p>Log in with this email address ([Email]). Your dashboard shows your referral link, your sales and your commissions.</p>" +
-    "<p>If you have any questions, please contact us at [Contact Email].</p>" +
-    "<p>Protocol Therapeutics</p>",
-  REP_SIGNUP_REFERRER_APPROVED_BODY:
+      "<p>Great news - your application to become a Sales Agent with Protocol Therapeutics has been approved, and your account is ready.</p>" +
+      '<p><a href="[Link]" style="display:inline-block;background:#E0B156;color:#143056;font-weight:700;text-decoration:none;padding:12px 24px;border-radius:8px">Log In to Your Sales Agent Dashboard</a></p>' +
+      "<p>Log in with this email address ([Email]). Your dashboard shows your referral link, your sales and your commissions.</p>" +
+      "<p>If you have any questions, please contact us at [Contact Email].</p>" +
+      "<p>Protocol Therapeutics</p>",
+  ],
+  REP_SIGNUP_REFERRER_APPROVED_BODY: [
+    V2.REP_SIGNUP_REFERRER_APPROVED_BODY,
     "<p>Hi [First Name],</p>" +
-    "<p>[Agent Name], who signed up with your referral link, has been approved as a Protocol Therapeutics Sales Agent.</p>" +
-    "<p>You will earn a referral commission on their sales, shown on your Sales Agent dashboard.</p>" +
-    "<p>Protocol Therapeutics</p>",
-  REP_SIGNUP_REFERRER_REJECT_BODY:
+      "<p>[Agent Name], who signed up with your referral link, has been approved as a Protocol Therapeutics Sales Agent.</p>" +
+      "<p>You will earn a referral commission on their sales, shown on your Sales Agent dashboard.</p>" +
+      "<p>Protocol Therapeutics</p>",
+  ],
+  REP_SIGNUP_REFERRER_REJECT_BODY: [
+    V2.REP_SIGNUP_REFERRER_REJECT_BODY,
     "<p>Hi [First Name],</p>" +
-    "<p>Thank you for referring [Agent Name] to Protocol Therapeutics. After reviewing their application, we are unable to approve it at this time.</p>" +
-    "<p><b>Reason:</b> [Reason]</p>" +
-    "<p>If you have any questions, please contact us at [Contact Email].</p>" +
-    "<p>Protocol Therapeutics</p>",
+      "<p>Thank you for referring [Agent Name] to Protocol Therapeutics. After reviewing their application, we are unable to approve it at this time.</p>" +
+      "<p><b>Reason:</b> [Reason]</p>" +
+      "<p>If you have any questions, please contact us at [Contact Email].</p>" +
+      "<p>Protocol Therapeutics</p>",
+  ],
   REP_SIGNUP_REJECT_BODY: [
+    V2.REP_SIGNUP_REJECT_BODY,
     "<p>Hi [First Name],</p>" +
       "<p>Thank you for your interest in becoming a Sales Agent with Protocol Therapeutics. " +
       "After reviewing your application, we are unable to approve it at this time.</p>" +

@@ -6,7 +6,7 @@ name = "Protocol Therapeutics"
 # name = "Test Protocol Therapeutics"
 # application_url = "https://test.protocoltherapeutics.com"
 application_url = "https://api.protocoltherapeutics.com"
-# application_url = "https://properties-metal-larger-transportation.trycloudflare.com"
+# application_url = "https://ottawa-category-ferrari-smoke.trycloudflare.com"
 embedded = true
 
 [webhooks]
@@ -54,7 +54,7 @@ scopes = "read_all_orders,read_customers,read_files,read_inventory,read_location
 
 [auth]
 # redirect_urls = [ "https://test.protocoltherapeutics.com/auth/callback", "https://test.protocoltherapeutics.com/api/auth" ]
-# redirect_urls = [ "https://properties-metal-larger-transportation.trycloudflare.com/auth/callback", "https://properties-metal-larger-transportation.trycloudflare.com/api/auth" ]
+# redirect_urls = [ "https://ottawa-category-ferrari-smoke.trycloudflare.com/auth/callback", "https://ottawa-category-ferrari-smoke.trycloudflare.com/api/auth" ]
 redirect_urls = [ "https://api.protocoltherapeutics.com/auth/callback", "https://api.protocoltherapeutics.com/api/auth" ]
 
 [build]
