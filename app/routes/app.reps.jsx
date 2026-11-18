@@ -334,12 +334,13 @@ function PendingSignup({ a, busy }) {
                 <Text as="h4" variant="headingXs">Reject</Text>
                 <TextField
                   label="Reason"
+                  requiredIndicator
                   name="note"
                   value={note}
                   onChange={setNote}
                   autoComplete="off"
                   multiline={2}
-                  placeholder={mail ? "Included in the rejection emails" : "Optional - only kept on the sign-up"}
+                  placeholder={mail ? "Required - included in the rejection emails" : "Required - kept on the sign-up"}
                 />
                 <InlineStack align="space-between" blockAlign="center" gap="200">
                   <Checkbox
@@ -347,12 +348,12 @@ function PendingSignup({ a, busy }) {
                     checked={mail}
                     onChange={setMail}
                   />
-                  <Button submit tone="critical" loading={rejecting} disabled={(busy && !rejecting) || (mail && !note.trim())}>
+                  <Button submit tone="critical" loading={rejecting} disabled={(busy && !rejecting) || !note.trim()}>
                     Reject
                   </Button>
                 </InlineStack>
-                {mail && !note.trim() ? (
-                  <Text as="p" tone="subdued" variant="bodySm">Type a reason to reject with emails, or untick the box.</Text>
+                {!note.trim() ? (
+                  <Text as="p" tone="subdued" variant="bodySm">Type the reason for rejecting to enable Reject.</Text>
                 ) : null}
               </BlockStack>
             </Form>

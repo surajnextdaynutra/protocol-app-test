@@ -210,6 +210,7 @@ check("why answer stored", apps[0]?.whyJoin, "I work with clinics in Austin.\n\n
 const terms = await S.applicationTerms(apps[0].id);
 check("signed terms kept word for word", terms.terms, "Agreement text for this test.");
 check("reject + email needs a reason", (await S.rejectApplication(apps[0].id, { by: "test", note: " ", notify: true })).ok, false);
+check("reject without emails needs a reason too", (await S.rejectApplication(apps[0].id, { by: "test", note: "", notify: false })).ok, false);
 check("still pending after refused reject", (await S.listApplications({ status: "Pending" })).length, 1);
 // no network here: the rejection stands, the failed email is reported and kept
 const rej = await S.rejectApplication(apps[0].id, { by: "test", note: "Territory already covered", notify: true });
@@ -218,7 +219,7 @@ check("failed email reported", !!rej.warning, true);
 const rejected = (await S.listApplications({ status: "Rejected" }))[0];
 check("reject reason kept", rejected?.reviewNote, "Territory already covered");
 check("email failure kept", !!rejected?.rejectEmailError, true);
-check("only pending can be rejected", (await S.rejectApplication(apps[0].id, { by: "test" })).ok, false);
+check("only pending can be rejected", (await S.rejectApplication(apps[0].id, { by: "test", note: "again" })).error, "Only a pending sign-up can be rejected.");
 // rejection emails go to the applicant AND the referring agent (both recorded)
 check("reject emails: applicant + referrer attempted", (rejected?.emails || []).map((e) => e.kind).sort().join(","), "referrer-rejected,rejected");
 check("reject emails: applicant address", (rejected?.emails || []).find((e) => e.kind === "rejected")?.to, "dana@test.local");

@@ -619,7 +619,8 @@ export async function approveApplication(id, { by = "" } = {}) {
 export async function rejectApplication(id, { by = "", note = "", notify = false } = {}) {
   await connectDb();
   const reason = String(note || "").trim().slice(0, 500);
-  if (notify && !reason) return { ok: false, error: "Enter the reason - it is included in the rejection emails." };
+  // a reason is required for every reject (kept on the sign-up; included in the emails when they are sent)
+  if (!reason) return { ok: false, error: "Enter the reason for rejecting this sign-up." };
   const res = await RepApplication.updateOne(
     { _id: id, status: "Pending" },
     { $set: { status: "Rejected", reviewedBy: String(by), reviewedAt: new Date(), reviewNote: reason } },
