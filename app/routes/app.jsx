@@ -27,7 +27,7 @@ export default function App() {
         <Link to="/app" rel="home">
           Overview
         </Link>
-        <Link to="/app/prescriptions">Prescriptions</Link>
+        <Link to="/app/prescriptions">Protocol</Link>
         <Link to="/app/orders">Orders &amp; commissions</Link>
         <Link to="/app/payouts">Payouts</Link>
         <Link to="/app/accounts">Accounts</Link>
