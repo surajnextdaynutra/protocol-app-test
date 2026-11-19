@@ -185,6 +185,22 @@ function SALES_AGENT_MESSAGES() {
       when: "Sent to the Sales Agent who referred the applicant, when you reject with the emails ticked.",
       placeholders: [...referrer, reasonToken, contactToken],
     },
+    {
+      ...common, id: "agent-invite", label: "Invite: referral link",
+      subjectKey: "REP_INVITE_SUBJECT", bodyKey: "REP_INVITE_BODY",
+      settings: [{
+        key: "REP_INVITE_DAILY_LIMIT", label: "Invites per agent per day", type: "text",
+        help: "How many invites one Sales Agent can send in 24 hours. The same address can be invited once per 24 hours.",
+      }],
+      settingsTitle: "Limit",
+      when: "Sent when a Sales Agent clicks Email Link on their dashboard's Referral Link card and enters someone's first name and email. It goes out from the store's address; replies go to the agent.",
+      placeholders: [
+        { token: "First Name", sample: "Jane", note: "the person invited" },
+        { token: "Referring Sales Agent", sample: "John Carter", note: "the agent's name" },
+        { token: "Link", sample: "cfg:SIGNUP", note: "the agent's referral sign-up link" },
+        { token: "Agent Email", sample: "john.carter@example.com", note: "the agent's email" },
+      ],
+    },
   ];
 }
 
@@ -207,6 +223,10 @@ const byId = (id) => MESSAGES.find((m) => m.id === id);
 function liveSample(sample, cfg) {
   if (sample === "cfg:LINK") return welcomeLinkForRole(cfg.WELCOME_EMAIL_LINK, "Sales Rep");
   if (sample === "cfg:CONTACT") return String(cfg.REP_SIGNUP_NOTIFY_EMAIL || cfg.SALES_EMAIL || "").trim();
+  if (sample === "cfg:SIGNUP") {
+    // the sign-up page on the store's own address (a real agent's link adds ?ref=<code>)
+    try { return new URL(String(cfg.WELCOME_EMAIL_LINK || "")).origin + "/pages/rep-signup"; } catch { return "/pages/rep-signup"; }
+  }
   return sample;
 }
 const withLiveSamples = (m, cfg) => m.placeholders.map((p) => ({ ...p, sample: liveSample(p.sample, cfg) }));

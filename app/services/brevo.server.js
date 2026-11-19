@@ -83,9 +83,9 @@ export function fillTemplate(tpl, values) {
  * email is built from subject / htmlBody. Throws on failure (and when email
  * is switched off) so a caller never reports a send that did not happen.
  */
-export async function sendEmail({ to, subject, htmlBody, params, templateId }) {
+export async function sendEmail({ to, subject, htmlBody, params, templateId, replyTo }) {
   try {
-    return await sendEmailOnce({ to, subject, htmlBody, params, templateId });
+    return await sendEmailOnce({ to, subject, htmlBody, params, templateId, replyTo });
   } catch (err) {
     // every failed / blocked email is logged with its reason
     logEvent("email", to, `NOT sent "${subject || `template ${templateId}`}": ${String(err?.message || err).slice(0, 300)}`, null, false);
@@ -93,7 +93,9 @@ export async function sendEmail({ to, subject, htmlBody, params, templateId }) {
   }
 }
 
-async function sendEmailOnce({ to, subject, htmlBody, params, templateId }) {
+async function sendEmailOnce({ to, subject, htmlBody, params, templateId, replyTo }) {
+  // optional { email, name }: where the recipient's reply goes (e.g. the Sales Agent who sent an invite)
+  const reply = replyTo?.email ? { replyTo: { email: replyTo.email, ...(replyTo.name ? { name: replyTo.name } : {}) } } : {};
   const cfg = await getSettings();
   if (READ_ONLY) throw new Error("Read-only mode (RX_READ_ONLY): email was not sent.");
   if (isTrue(cfg.EMAIL_DISABLED)) {
@@ -108,6 +110,7 @@ async function sendEmailOnce({ to, subject, htmlBody, params, templateId }) {
       to: [{ email: to }],
       templateId: Number(templateId),
       params: params || {},
+      ...reply,
     });
   } else {
     if (!cfg.BREVO_SENDER_EMAIL) {
@@ -119,6 +122,7 @@ async function sendEmailOnce({ to, subject, htmlBody, params, templateId }) {
         email: cfg.BREVO_SENDER_EMAIL,
       },
       to: [{ email: to }],
+      ...reply,
       subject,
       htmlContent: htmlBody || undefined,
       textContent: htmlToText(htmlBody) || undefined,

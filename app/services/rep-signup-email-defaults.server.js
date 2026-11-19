@@ -56,8 +56,9 @@ const REASON = `
  *   reason     true = the Reason panel after the message
  *   cta        { label, href } button
  *   support    the line under the button
+ *   footer     false = no divider / "Support Team" sign-off (an email signed by a Sales Agent)
  */
-function layout({ title, preheader, greeting, salutation, message, reason = false, cta = null, support }) {
+function layout({ title, preheader, greeting, salutation, message, reason = false, cta = null, support, footer = true }) {
   return `<!doctype html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
 <head>
@@ -125,6 +126,7 @@ ${reason ? REASON : ""}${cta ? button(cta.label, cta.href) : ""}
             </td>
           </tr>
 
+${footer ? `
           <!-- Divider -->
           <tr>
             <td class="pt-pad" style="padding:30px 40px 20px;">
@@ -140,7 +142,9 @@ ${reason ? REASON : ""}${cta ? button(cta.label, cta.href) : ""}
               The Protocol Therapeutics Support Team
             </td>
           </tr>
-
+` : `
+          <tr><td style="padding:0 0 32px;font-size:0;line-height:0;">&nbsp;</td></tr>
+`}
         </table>
 
       </td>
@@ -209,6 +213,26 @@ export const REFERRER_REJECT_BODY_DEFAULT = layout({
   support:
     "Thank you for making the introduction and for your continued support of the Protocol Therapeutics Sales Agent Program.<br /><br />" +
     `If you have any questions, please feel free to contact us at ${CONTACT}.`,
+});
+
+/* Referral invite a Sales Agent emails from their dashboard (Referral Link
+   card -> Email Link; rep-invite.server.js). Signed by the agent, so no
+   "Support Team" footer. Replies go to the agent (reply-to). */
+export const INVITE_SUBJECT_DEFAULT = "You’re Invited to Become a Protocol Therapeutics Sales Agent!";
+export const INVITE_BODY_DEFAULT = layout({
+  title: "You’re Invited to Become a Sales Agent",
+  preheader: "[Referring Sales Agent] is inviting you to join the Protocol Therapeutics Sales Agent Program.",
+  salutation: "Hi [First Name],",
+  message:
+    "I’m inviting you to join the Protocol Therapeutics Sales Agent Program!<br /><br />" +
+    "As a Sales Agent, you can earn commissions by connecting businesses with Protocol Therapeutics—and unlock additional earning opportunities by growing your own Sales Agent network.<br /><br />" +
+    "Ready to get started? Apply using my referral link:",
+  cta: { label: "APPLY NOW", href: "[Link]" },
+  support:
+    "Complete the application, review the program terms, and the Protocol Therapeutics team will be in touch after reviewing your information.<br /><br />" +
+    "I’d love to have you join me!<br /><br />" +
+    "Best,<br />[Referring Sales Agent]",
+  footer: false,
 });
 
 /* The branded versions of 2026-11-18, replaced 2026-11-19 by the wording above. */

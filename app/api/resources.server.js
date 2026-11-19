@@ -41,6 +41,7 @@ import { markNoticesSeen, rowHistory, saveRepRow } from "../services/rep-rates.s
 import { repCommissionUpdates, repEarningHistory, repEarnings } from "../services/rep-earnings.server";
 import { resendFailedDecisionEmails, signupInfo, submitSignup } from "../services/rep-signup.server";
 import { repTeam } from "../services/rep-team.server";
+import { sendRepInvite } from "../services/rep-invite.server";
 import {
   clinicDoctors,
   clinicInfo,
@@ -400,6 +401,16 @@ const rep = {
   commissionUpdates: ({ p, caller }) => {
     requireRep(caller, p);
     return repCommissionUpdates(p);
+  },
+  // Referral Link card -> Email Link: emails an invite with the agent's link.
+  // Only the agent themself (not finance viewing their dashboard) sends.
+  inviteEmail: ({ p, caller, method }) => {
+    if (method !== "POST") throw new ApiError("Use POST.", 405);
+    requireRep(caller, p);
+    if (!caller.repId || caller.repId !== String(p.rep || "").trim()) {
+      throw new ApiError("Only the Sales Agent can send invites from this dashboard.", 403);
+    }
+    return sendRepInvite({ repId: caller.repId, firstName: p.firstName, email: p.email, signupPath: p.signupPath });
   },
 };
 

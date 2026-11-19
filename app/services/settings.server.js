@@ -4,6 +4,8 @@ import * as M from "./message-defaults.server";
 import {
   APPROVED_BODY_DEFAULT,
   APPROVED_SUBJECT_DEFAULT,
+  INVITE_BODY_DEFAULT,
+  INVITE_SUBJECT_DEFAULT,
   PREVIOUS as REP_SIGNUP_PREVIOUS,
   REFERRER_APPROVED_BODY_DEFAULT,
   REFERRER_APPROVED_SUBJECT_DEFAULT,
@@ -19,6 +21,8 @@ import { invalidateResponses } from "./response-cache.server";
 export {
   APPROVED_BODY_DEFAULT,
   APPROVED_SUBJECT_DEFAULT,
+  INVITE_BODY_DEFAULT,
+  INVITE_SUBJECT_DEFAULT,
   REFERRER_APPROVED_BODY_DEFAULT,
   REFERRER_APPROVED_SUBJECT_DEFAULT,
   REFERRER_REJECT_BODY_DEFAULT,
@@ -111,6 +115,9 @@ export const SETTINGS_DEFAULTS = [
   ["REP_SIGNUP_REJECT_BODY", REJECT_BODY_DEFAULT, "Body of that email (HTML or plain text). Placeholders: [First Name] [Last Name] [Name] [Email] [Reason] [Contact Email] (= REP_SIGNUP_NOTIFY_EMAIL, else SALES_EMAIL).", "repsignup"],
   ["REP_SIGNUP_REFERRER_REJECT_SUBJECT", REFERRER_REJECT_SUBJECT_DEFAULT, "Reject (with \"Send rejection emails\" ticked): subject of the email to the Sales Agent who referred the applicant. Placeholders: [First Name] [Name] (the referrer), [Agent Name] [Agent First Name] [Reason] [Contact Email].", "repsignup"],
   ["REP_SIGNUP_REFERRER_REJECT_BODY", REFERRER_REJECT_BODY_DEFAULT, "Body of that email (HTML or plain text). Same placeholders.", "repsignup"],
+  ["REP_INVITE_SUBJECT", INVITE_SUBJECT_DEFAULT, "Email Link (Sales Agent dashboard -> Referral Link card): subject of the invite a Sales Agent emails to someone they want to refer. Placeholders: [First Name] (the person invited), [Referring Sales Agent] (the agent's name).", "repsignup"],
+  ["REP_INVITE_BODY", INVITE_BODY_DEFAULT, "Body of that email (HTML or plain text). Placeholders: [First Name] [Referring Sales Agent] [Link] (the agent's referral sign-up link) [Agent Email]. Replies go to the agent.", "repsignup"],
+  ["REP_INVITE_DAILY_LIMIT", "25", "How many invite emails one Sales Agent can send in 24 hours (Email Link on the Referral Link card). The same address can be invited once per 24 hours.", "repsignup"],
   // --- product copies
   ["PRODUCT_SYNC_DELETE_ORPHANS", "FALSE", "TRUE = when a practice's last portal account is removed, delete that practice's product copies (after it has been missing on two sync runs). FALSE = only report them on the Products page.", "products"],
   ["LOCATION_ID", "", "Shopify inventory location id used for shared inventory. Blank = the store's primary location. Changing it re-stocks every copy at the new location from the master list.", "products"],

@@ -672,3 +672,20 @@ const kvSchema = new Schema(
   { versionKey: false },
 );
 export const Kv = model("Kv", kvSchema, "kv");
+
+/* Referral invites a Sales Agent emailed from their dashboard ("Email Link"
+   on the Referral Link card - services/rep-invite.server.js). One row per
+   attempt; also the source of the per-agent daily limit. */
+const repInviteSchema = new Schema(
+  {
+    repId: { type: String, required: true, index: true },
+    email: { type: String, required: true },
+    firstName: { type: String, default: "" },
+    ok: { type: Boolean, default: false },
+    error: { type: String, default: "" },
+    sentAt: { type: Date, default: Date.now, index: true },
+  },
+  { versionKey: false },
+);
+repInviteSchema.index({ repId: 1, email: 1, sentAt: -1 });
+export const RepInvite = model("RepInvite", repInviteSchema, "rep_invites");
