@@ -245,15 +245,23 @@ export async function repEarningHistory({ rep: repId = "", type = "", id = "" } 
 /**
  * The commission-change alert: the rep's unseen notices, resolved to the
  * Earnings rows whose rate they changed, each with its rate history.
- * { notices: [ids], targets: [{ key, type, id, name, rows }] }
+ * `recent` (the dashboard's bell icon) also brings back the notices already
+ * dismissed in the last RECENT_DAYS days, so a closed alert can be reopened.
+ * { notices: [ids], unseen, targets: [{ key, type, id, name, rows }] }
  */
-export async function repCommissionUpdates({ rep: repId = "" } = {}) {
+const RECENT_DAYS = 90;
+export async function repCommissionUpdates({ rep: repId = "", recent = "" } = {}) {
   repId = String(repId || "").trim();
+  const withSeen = recent === true || /^(1|true|yes)$/i.test(String(recent || ""));
   await connectDb();
   const rep = await SalesRep.findOne({ repId }).lean();
   if (!rep) return { ok: false, error: "Sales rep not found." };
-  const notices = await RepNotice.find({ repId, seenAt: null }).sort({ createdAt: -1 }).limit(50).lean();
-  if (!notices.length) return { ok: true, notices: [], targets: [] };
+  const q = withSeen
+    ? { repId, $or: [{ seenAt: null }, { createdAt: { $gte: new Date(Date.now() - RECENT_DAYS * 24 * 60 * 60 * 1000) } }] }
+    : { repId, seenAt: null };
+  const notices = await RepNotice.find(q).sort({ createdAt: -1 }).limit(50).lean();
+  const unseen = notices.filter((n) => !n.seenAt).length;
+  if (!notices.length) return { ok: true, notices: [], unseen: 0, targets: [] };
   const changeIds = notices.map((n) => n.changeId).filter((x) => /^[a-f0-9]{24}$/i.test(String(x || "")));
   const changes = changeIds.length ? await CommissionChange.find({ _id: { $in: changeIds } }).lean() : [];
 
@@ -297,5 +305,5 @@ export async function repCommissionUpdates({ rep: repId = "" } = {}) {
     targets.push({ key, type: w.type, id: w.id, name, rows, latest: rows[0]?.ts || 0 });
   }
   targets.sort((a, b) => b.latest - a.latest || a.name.localeCompare(b.name));
-  return { ok: true, notices: notices.map((n) => String(n._id)), targets };
+  return { ok: true, notices: notices.map((n) => String(n._id)), unseen, targets };
 }
