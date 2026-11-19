@@ -21,8 +21,8 @@ export const KINDS = {
   // (a kind may set `max` to cap its rates; referral has no cap since 2026-11-14)
   referral: { key: "REFERRAL_COMMISSION_PER_UNIT", field: "referralRate", fallback: 0.2, label: "referral" },
 };
-/** $ per unit a referrer earns on a NEW referral - set as that referral's own
- *  rate when the referrer is attached (setReferrer), editable afterwards. */
+/** The built-in starting referral rate ($0.20). New referrals now start at the
+ *  saved referral default (setReferrer), which falls back to this value. */
 export const NEW_REFERRAL_RATE = 0.2;
 /** Settings key -> rate kind (the Settings page routes these through setDefaultRate). */
 export const DEFAULT_RATE_KEYS = Object.fromEntries(Object.entries(KINDS).map(([k, v]) => [v.key, k]));
@@ -561,12 +561,14 @@ export async function setReferrer(repId, referrerRepId, { by = "", note = "" } =
     }
   }
   const effectiveAt = new Date();
-  // A newly added referral always starts at NEW_REFERRAL_RATE ($0.20 per
-  // unit, client 2026-11-18) as its own per-referral rate - whatever the
-  // saved default is. It can be changed later in the Edit popup. Removing the
-  // referrer clears the per-referral rate (there is nobody to pay it to).
+  // A newly added referral starts at the saved Default Referral Commission
+  // (Finance dashboard -> Sales Agents -> Default Commission; $0.20 unless
+  // changed, client 2026-11-18 / 2026-11-20) as its own per-referral rate.
+  // Changing the default later does not move referrals already added. It can
+  // be changed later in the Edit popup. Removing the referrer clears the
+  // per-referral rate (there is nobody to pay it to).
   const oldSponsor = rep.sponsorRate !== null && rep.sponsorRate !== undefined ? round2(rep.sponsorRate) : null;
-  const newSponsor = to ? NEW_REFERRAL_RATE : null;
+  const newSponsor = to ? await defaultRateNow("referral") : null;
   await SalesRep.updateOne({ repId }, { $set: { referredBy: to, sponsorRate: newSponsor } });
   await CommissionChange.create({
     scope: "rep", repId, kind: "referrer", from, to, effectiveAt, by: String(by), note: String(note || ""),

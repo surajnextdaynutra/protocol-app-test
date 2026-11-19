@@ -14,7 +14,7 @@ import {
   setPayoutRecordStatus,
 } from "../commission.server";
 import { decryptJson } from "../crypto.server";
-import { currentRates } from "../rep-rates.server";
+import { currentRates, defaultRateNow } from "../rep-rates.server";
 import { demoIdSet } from "../ids.server";
 import { kvGet, kvSet, logEvent } from "../log.server";
 import { gid, gql } from "../shopify-admin.server";
@@ -664,6 +664,8 @@ export async function financeDashboard(p) {
     practiceCount: practices.length,
     repCount: reps.length,
     repDefaultRate: defaultRepRate,
+    // Sales Agents -> Default Commission popup
+    repDefaultReferralRate: await defaultRateNow("referral"),
   };
 
   /* ---- every store order in the window (not only ledger ones) ---- */
