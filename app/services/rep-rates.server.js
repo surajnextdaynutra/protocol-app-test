@@ -236,7 +236,21 @@ export async function setDefaultRate(kind, value, { by = "", note = "" } = {}) {
   const change = await CommissionChange.create({
     scope: "default", repId: "", kind, from: prev, to: parsed.value, effectiveAt, by: String(by), note: String(note || ""),
   });
-  const affected = await SalesRep.find({ active: { $ne: false }, [k.field]: null }, { repId: 1 }).lean();
+  // Only agents whose pay actually follows this default are told. Agents on
+  // a custom rate are untouched and get no notice.
+  let affected = await SalesRep.find({ active: { $ne: false }, [k.field]: null }, { repId: 1 }).lean();
+  if (kind === "referral" && affected.length) {
+    // A referral carries its own rate (sponsorRate, set when it was added), so
+    // a referrer is affected only through a referral with NO own rate.
+    const onDefault = new Set(
+      await SalesRep.distinct("referredBy", {
+        active: { $ne: false },
+        referredBy: { $in: affected.map((r) => r.repId) },
+        sponsorRate: null,
+      }),
+    );
+    affected = affected.filter((r) => onDefault.has(r.repId));
+  }
   const when = await whenText(effectiveAt);
   const notified = await notify(
     affected.map((r) => r.repId),

@@ -6,7 +6,7 @@ import { ActionResult, useBusy } from "../components/admin";
 import { TermsFrame } from "../components/terms-frame";
 import { MESSAGE_SETTING_KEYS } from "../services/message-templates.server";
 import { listCounters, setCounter } from "../services/provisioning.server";
-import { DEFAULT_RATE_KEYS, setDefaultRate } from "../services/rep-rates.server";
+import { DEFAULT_RATE_KEYS } from "../services/rep-rates.server";
 import { listSettings, setSetting } from "../services/settings.server";
 import { authenticate } from "../shopify.server";
 
@@ -32,7 +32,8 @@ const ON_EMAILS_PAGE = new Set(["reminders", "email", "sms", "welcome"]);
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
   // keys a message on the Emails page owns are edited there, not here
-  const rows = (await listSettings()).filter((r) => !MESSAGE_SETTING_KEYS.has(r.key));
+  // the default rep commission is changed on the Finance dashboard only
+  const rows = (await listSettings()).filter((r) => !MESSAGE_SETTING_KEYS.has(r.key) && !DEFAULT_RATE_KEYS[r.key]);
   return {
     // a stored secret is never sent back to the browser
     settings: rows.map((r) => (r.secret ? { ...r, value: "", hasValue: !!r.value } : r)),
@@ -56,14 +57,8 @@ export const action = async ({ request }) => {
     if (!k.startsWith("s:")) continue;
     const key = k.slice(2);
     if (secretKeys.has(key) && !String(v).trim()) continue; // blank = keep the stored secret
-    if (DEFAULT_RATE_KEYS[key]) {
-      // a default rep rate: recorded in the history and shown to the reps on
-      // that default (unchanged value = nothing happens)
-      const res = await setDefaultRate(DEFAULT_RATE_KEYS[key], v, { by: "Shopify admin (Settings)" });
-      if (!res.ok) return { ok: false, message: `${key}: ${res.error}` };
-      if (res.changed) n++;
-      continue;
-    }
+    // the default rep commission is changed on the Finance dashboard only
+    if (DEFAULT_RATE_KEYS[key]) continue;
     await setSetting(key, v);
     n++;
   }

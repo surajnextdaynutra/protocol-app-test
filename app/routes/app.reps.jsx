@@ -27,7 +27,6 @@ import { PAID_EXPR } from "../services/commission.server";
 import { commissionsOverview } from "../services/exec-commissions.server";
 import {
   ensureReferralCode,
-  setDefaultRate,
   setReferrer,
   setRepRate,
 } from "../services/rep-rates.server";
@@ -123,14 +122,8 @@ export const action = async ({ request }) => {
   const intent = String(f.get("intent") || "");
 
   if (intent === "defaults") {
-    const note = String(f.get("note") || "");
-    const msgs = [];
-    for (const kind of ["direct", "referral"]) {
-      const res = await setDefaultRate(kind, f.get(kind), { by: BY, note });
-      if (!res.ok) return { ok: false, message: `Default ${kind}: ${res.error}` };
-      if (res.changed) msgs.push(`default ${kind} ${money(res.from)} → ${money(res.to)} (${res.notified} rep(s) notified)`);
-    }
-    return { ok: true, message: msgs.length ? "Saved: " + msgs.join("; ") + "." : "No change." };
+    // Default commission is changed on the executive (Finance) dashboard only.
+    return { ok: false, message: "Default commission is changed on the Finance dashboard → Sales Agents → Default Commission." };
   }
 
   if (intent === "approve") {
@@ -190,35 +183,29 @@ export const action = async ({ request }) => {
 
 /* ------------------------------------------------------------------------ */
 
-function DefaultsCard({ defaults, reps, busy }) {
-  const [v, setV] = useState({ direct: defaults.direct.toFixed(2), referral: defaults.referral.toFixed(2), note: "" });
-  const set = (k) => (val) => setV((s) => ({ ...s, [k]: val }));
-  const saving = useBusy("defaults");
+/** Read-only here: the default commission is changed on the executive
+ *  (Finance) dashboard only. */
+function DefaultsCard({ defaults, reps }) {
   const onDirect = reps.filter((r) => r.active && r.directRate === "").length;
   const onReferral = reps.filter((r) => r.active && r.referralRate === "").length;
   return (
     <Card>
-      <Form method="post">
-        <input type="hidden" name="intent" value="defaults" />
-        <FormLayout>
-          <Text as="h2" variant="headingMd">Default commission for all Sales Agents</Text>
-          <Text as="p" tone="subdued">
-            A change applies to orders placed from the moment you save; earlier orders keep their rate. Reps on the
-            default see the change on their dashboard.
-          </Text>
-          <FormLayout.Group>
-            <TextField label="Direct sales ($ per unit)" name="direct" value={v.direct} onChange={set("direct")} prefix="$" autoComplete="off"
-              helpText={`${onDirect} active rep(s) on this default`} />
-            <TextField label="Referral ($ per unit)" name="referral" value={v.referral} onChange={set("referral")} prefix="$" autoComplete="off"
-              helpText={`Paid to the referring rep on every unit their referred reps sell. ${onReferral} active rep(s) on this default.`} />
-          </FormLayout.Group>
-          <TextField label="Message to reps (optional)" name="note" value={v.note} onChange={set("note")} autoComplete="off"
-            helpText="Added to the dashboard notice the affected reps see." />
-          <InlineStack>
-            <Button submit variant="primary" loading={saving} disabled={busy && !saving}>Save defaults</Button>
-          </InlineStack>
-        </FormLayout>
-      </Form>
+      <BlockStack gap="300">
+        <Text as="h2" variant="headingMd">Default commission for all Sales Agents</Text>
+        <Banner tone="info">
+          <p>
+            Change the default on the Finance dashboard → Sales Agents → Default Commission. A change applies to orders
+            placed from that moment on; earlier orders keep their rate. Only agents on the default are affected and
+            notified. Agents with their own rate are not.
+          </p>
+        </Banner>
+        <FormLayout.Group>
+          <TextField label="Direct sales ($ per unit)" value={defaults.direct.toFixed(2)} prefix="$" disabled autoComplete="off"
+            helpText={`${onDirect} active agent(s) on this default`} />
+          <TextField label="Referral ($ per unit)" value={defaults.referral.toFixed(2)} prefix="$" disabled autoComplete="off"
+            helpText={`Starting rate of each new referral. ${onReferral} active agent(s) on this default.`} />
+        </FormLayout.Group>
+      </BlockStack>
     </Card>
   );
 }
@@ -782,7 +769,7 @@ export default function Reps() {
 
         {tab === "commission" ? (
           <BlockStack gap="400">
-            <DefaultsCard defaults={defaults} reps={reps} busy={busy} />
+            <DefaultsCard defaults={defaults} reps={reps} />
             <HistoryCard history={data.history} reps={reps} />
           </BlockStack>
         ) : null}
